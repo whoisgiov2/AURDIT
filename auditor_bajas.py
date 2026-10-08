@@ -44,7 +44,7 @@ MATRIZ DE EVALUACIÓN DE RIESGOS Y SEGMENTACIÓN TRIPARTITA:
      ESTATUS_AUDITORIA = 'OK'.
 
 ESTRUCTURA DE EXPORTACIÓN EN EXCEL (OPENPYXL):
-- Pestaña 1: 'Glosario_y_Criterios' (metodología, diccionario de estatus, matriz de severidad y reglas técnicas).
+- Pestaña 1: 'Resumen_Auditoria' (datos cuantitativos de la ejecución: volumen, resultados por categoría e indicadores).
 - Pestaña 2: 'Auditoria_Completa' (padrón íntegro con todas las columnas de auditoría).
 - Pestaña 3: 'Riesgos_Activos' (casos críticos y huérfanos que requieren acción inmediata de TI).
 - Pestaña 4: 'Incidentes_Pasados' (casos medios/remediados ordenados por último login descendente).
@@ -96,6 +96,12 @@ class AuditMetrics:
     total_sin_fecha_baja: int = 0
     tiempo_total_segundos: float = 0.0
     output_path: str = ""
+    # Datos de la ejecución (los completa el pipeline)
+    fecha_auditoria: str = ""
+    universo_archivo: str = ""
+    reporte_archivo: str = ""
+    total_universo_original: int = 0
+    total_registros_reporte: int = 0
 
 
 # ============================================================================
@@ -1186,302 +1192,129 @@ def _write_cell(
         cell.alignment = alignment
 
 
-def create_glosario_sheet(workbook: openpyxl.Workbook) -> openpyxl.worksheet.worksheet.Worksheet:
-    """
-    Crea e inserta como primera pestaña (index=0) la hoja 'Glosario_y_Criterios'.
-    Estructura técnica y ejecutiva:
-    1. Estructura del Libro (Propósito y alcance de cada pestaña).
-    2. Diccionario de Estatus y Categorías de Riesgo Operativo.
-    3. Reglas Técnicas Aplicadas y Metodología de Procesamiento.
-    """
-    sheet_title = "Glosario_y_Criterios"
-    if sheet_title in workbook.sheetnames:
-        del workbook[sheet_title]
+RESUMEN_SHEET = "Resumen_Auditoria"
 
-    ws = workbook.create_sheet(title=sheet_title, index=0)
+# (categoría, estatus, criterio breve, relleno, texto)
+_RESUMEN_CATEGORIAS = [
+    ("CRÍTICO - RIESGO ACTIVO", "REVISAR", "Login > baja y cuenta activa", "FFFEE2E2", "FF991B1B"),
+    ("ALTO - CUENTA HUÉRFANA", "REVISAR", "Sin login > baja y cuenta activa", "FFFEF3C7", "FF92400E"),
+    ("MEDIO - INCIDENTE PASADO", "INCIDENTE RESUELTO", "Login > baja y cuenta inactiva", "FFF1F5F9", "FF334155"),
+    ("POSIBLE REINGRESO", "OK", "Registros con y sin baja", "FFE0F2FE", "FF0369A1"),
+    ("CONFORME", "OK", "Sin login > baja y cuenta inactiva", "FFDCFCE7", "FF166534"),
+]
+
+
+def create_resumen_sheet(
+    workbook: openpyxl.Workbook,
+    df_completo: pd.DataFrame,
+    metrics: Optional[AuditMetrics] = None,
+) -> openpyxl.worksheet.worksheet.Worksheet:
+    """
+    Crea como primera pestaña (index=0) la hoja 'Resumen_Auditoria' con datos
+    cuantitativos de la auditoría ejecutada:
+    1. Datos de la ejecución (fecha y archivos de entrada).
+    2. Volumen procesado (registros del Universo, deduplicación y reporte).
+    3. Resultados por categoría de riesgo (cantidad y porcentaje).
+    4. Indicadores adicionales (discrepancias, sin registro, días post-baja).
+    Las filas que dependen de `metrics` solo se escriben si se proporcionó.
+    """
+    if RESUMEN_SHEET in workbook.sheetnames:
+        del workbook[RESUMEN_SHEET]
+    ws = workbook.create_sheet(title=RESUMEN_SHEET, index=0)
     ws.views.sheetView[0].showGridLines = True
 
-    # Paleta de colores ejecutivos y corporativos
-    c_banner_bg = "FF111827"    # Slate profundo (casi negro)
-    c_sub_bg = "FF1F2937"       # Slate oscuro
-    c_sec_bg = "FF1F2937"       # Slate oscuro para encabezados de sección
-    c_th_bg = "FF374151"        # Slate intermedio para encabezados de tabla
-    c_zebra = "FFF9FAFB"        # Fondo suave alternado
-    c_border = "FFD1D5DB"       # Borde sutil gris claro
+    font_name = "Segoe UI"
+    title_font = Font(name=font_name, size=14, bold=True, color="FFFFFFFF")
+    title_fill = PatternFill(start_color="FF1F2937", end_color="FF1F2937", fill_type="solid")
+    head_font = Font(name=font_name, size=10, bold=True, color="FFFFFFFF")
+    head_fill = PatternFill(start_color="FF374151", end_color="FF374151", fill_type="solid")
+    body_font = Font(name=font_name, size=10, color="FF1F2937")
+    bold_font = Font(name=font_name, size=10, bold=True, color="FF1F2937")
+    side = Side(border_style="thin", color="FFE5E7EB")
+    border = Border(left=side, right=side, top=side, bottom=side)
+    left = Alignment(horizontal="left", vertical="center")
+    center = Alignment(horizontal="center", vertical="center")
 
-    # Resaltados semánticos de riesgo
-    c_critico_bg = "FFFEE2E2"
-    c_critico_fg = "FF991B1B"
+    total = len(df_completo)
+    fecha = (metrics.fecha_auditoria if metrics and metrics.fecha_auditoria else datetime.now().strftime("%d/%m/%Y"))
 
-    c_alto_bg = "FFFEF3C7"
-    c_alto_fg = "FF92400E"
+    _write_merged_cell(ws, "A1:D1", f"RESUMEN DE AUDITORÍA - {fecha}", title_font, title_fill, border, left)
+    ws.row_dimensions[1].height = 28
+    row = 3
 
-    c_medio_bg = "FFF1F5F9"
-    c_medio_fg = "FF334155"
+    def section(title: str, headers: list[str]) -> None:
+        nonlocal row
+        for i, h in enumerate(headers, start=1):
+            _write_cell(ws, row, i, h if i > 1 else title, head_font, head_fill, border, left if i == 1 else center)
+        row += 1
 
-    c_reingreso_bg = "FFE0F2FE"
-    c_reingreso_fg = "FF0369A1"
+    def line(label: str, *values: Any, bold: bool = False, fill: Optional[PatternFill] = None, fonts: Optional[Font] = None) -> None:
+        nonlocal row
+        _write_cell(ws, row, 1, label, fonts or (bold_font if bold else body_font), fill, border, left)
+        for i, v in enumerate(values, start=2):
+            _write_cell(ws, row, i, v, fonts or (bold_font if bold else body_font), fill, border, center)
+        row += 1
 
-    c_conforme_bg = "FFDCFCE7"
-    c_conforme_fg = "FF166534"
+    # 1. Volumen procesado
+    section("Volumen procesado", ["Concepto", "Cantidad"])
+    if metrics is not None:
+        if metrics.universo_archivo:
+            line("Archivo Universo", metrics.universo_archivo)
+        if metrics.reporte_archivo:
+            line("Archivo Reporte de Logins", metrics.reporte_archivo)
+        if metrics.total_universo_original:
+            line("Registros originales del Universo", metrics.total_universo_original)
+            line("Bajas antiguas depuradas", metrics.total_universo_original - total)
+        if metrics.total_registros_reporte:
+            line("Registros en el reporte de logins", metrics.total_registros_reporte)
+    line("Colaboradores evaluados", total, bold=True)
+    row += 1
 
-    # Fuentes tipográficas Segoe UI
-    f_title = Font(name="Segoe UI", size=13, bold=True, color="FFFFFFFF")
-    f_sub = Font(name="Segoe UI", size=9, italic=True, color="FFF3F4F6")
-    f_sec = Font(name="Segoe UI", size=10, bold=True, color="FFFFFFFF")
-    f_th = Font(name="Segoe UI", size=9, bold=True, color="FFFFFFFF")
-
-    f_body = Font(name="Segoe UI", size=9, color="FF1F2937")
-    f_body_bold = Font(name="Segoe UI", size=9, bold=True, color="FF1F2937")
-    f_body_code = Font(name="Consolas", size=9, color="FF1F2937")
-    f_footer = Font(name="Segoe UI", size=8, italic=True, color="FF6B7280")
-
-    f_critico = Font(name="Segoe UI", size=9, bold=True, color=c_critico_fg)
-    f_alto = Font(name="Segoe UI", size=9, bold=True, color=c_alto_fg)
-    f_medio = Font(name="Segoe UI", size=9, bold=True, color=c_medio_fg)
-    f_reingreso = Font(name="Segoe UI", size=9, bold=True, color=c_reingreso_fg)
-    f_conforme = Font(name="Segoe UI", size=9, bold=True, color=c_conforme_fg)
-
-    # Rellenos (Fills)
-    fill_banner = PatternFill(start_color=c_banner_bg, end_color=c_banner_bg, fill_type="solid")
-    fill_sub = PatternFill(start_color=c_sub_bg, end_color=c_sub_bg, fill_type="solid")
-    fill_sec = PatternFill(start_color=c_sec_bg, end_color=c_sec_bg, fill_type="solid")
-    fill_th = PatternFill(start_color=c_th_bg, end_color=c_th_bg, fill_type="solid")
-    fill_zebra = PatternFill(start_color=c_zebra, end_color=c_zebra, fill_type="solid")
-    fill_footer = PatternFill(start_color="FFF3F4F6", end_color="FFF3F4F6", fill_type="solid")
-
-    fill_critico = PatternFill(start_color=c_critico_bg, end_color=c_critico_bg, fill_type="solid")
-    fill_alto = PatternFill(start_color=c_alto_bg, end_color=c_alto_bg, fill_type="solid")
-    fill_medio = PatternFill(start_color=c_medio_bg, end_color=c_medio_bg, fill_type="solid")
-    fill_reingreso = PatternFill(start_color=c_reingreso_bg, end_color=c_reingreso_bg, fill_type="solid")
-    fill_conforme = PatternFill(start_color=c_conforme_bg, end_color=c_conforme_bg, fill_type="solid")
-
-    # Bordes
-    side_b = Side(border_style="thin", color=c_border)
-    b_cell = Border(left=side_b, right=side_b, top=side_b, bottom=side_b)
-
-    # Alineaciones
-    al_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    al_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    al_banner = Alignment(horizontal="center", vertical="center")
-    al_sec = Alignment(horizontal="left", vertical="center", indent=1)
-
-    # ---------------------------------------------------------
-    # Banner Principal (Filas 1 - 2)
-    # ---------------------------------------------------------
-    ws.row_dimensions[1].height = 32
-    _write_merged_cell(
-        ws, "A1:E1",
-        value="DICCIONARIO DE AUDITORÍA, METODOLOGÍA Y CRITERIOS DE RIESGO",
-        font=f_title, fill=fill_banner, alignment=al_banner,
-    )
-
-    ws.row_dimensions[3].height = 10  # Fila separadora
-
-    # ---------------------------------------------------------
-    # SECCIÓN 1: Estructura del Libro (Pestañas)
-    # ---------------------------------------------------------
-    ws.row_dimensions[4].height = 26
-    _write_merged_cell(
-        ws, "A4:E4",
-        value="1. ESTRUCTURA DEL LIBRO DE AUDITORÍA (PROPÓSITO Y ALCANCE DE CADA PESTAÑA)",
-        font=f_sec, fill=fill_sec, alignment=al_sec,
-    )
-
-    ws.row_dimensions[5].height = 24
-    _write_cell(ws, 5, 1, "Pestaña / Hoja", font=f_th, fill=fill_th, border=b_cell, alignment=al_center)
-    _write_cell(ws, 5, 2, "Tipo / Prioridad", font=f_th, fill=fill_th, border=b_cell, alignment=al_center)
-    _write_merged_cell(
-        ws, "C5:E5",
-        value="Descripción del Contenido y Alcance Operativo",
-        font=f_th, fill=fill_th, border=b_cell, alignment=al_center,
-    )
-
-    tabs_info = [
-        (
-            "Glosario_y_Criterios",
-            "Referencia Metodológica",
-            "Metodología, glosario de términos y criterios de severidad.",
-            fill_medio, f_medio,
-        ),
-        (
-            "Riesgos_Activos",
-            "Urgentes(Acción Inmediata)",
-            "Casos urgentes que requieren intervención inmediata de TI (cuentas activas Active == 1 post-baja o sin baja aplicada).",
-            fill_critico, f_critico,
-        ),
-        (
-            "Incidentes_Pasados",
-            "Auditoría (Cuenta Inactiva)",
-            "Evidencia histórica de accesos posteriores a la baja donde la cuenta ya fue deshabilitada (Active == 0).",
-            fill_medio, f_medio,
-        ),
-        (
-            "Reingresos",
-            "Informativo (Caso Válido)",
-            "Casos donde un colaborador tiene baja histórica pero cuenta con un registro activo vigente sin baja.",
-            fill_reingreso, f_reingreso,
-        ),
-        (
-            "Auditoria_Completa",
-            "Padrón Total Evaluado (100%)",
-            "Padrón total evaluado con todos los campos calculados y trazabilidad completa.",
-            fill_zebra, f_body_bold,
-        ),
-    ]
-
-    for idx, (tab_name, tab_prio, tab_desc, t_fill, t_font) in enumerate(tabs_info, start=6):
-        ws.row_dimensions[idx].height = 26
-        _write_cell(ws, idx, 1, tab_name, font=t_font, fill=t_fill, border=b_cell, alignment=al_center)
-        _write_cell(ws, idx, 2, tab_prio, font=t_font, fill=t_fill, border=b_cell, alignment=al_center)
-        _write_merged_cell(
-            ws, f"C{idx}:E{idx}",
-            value=tab_desc,
-            font=f_body, fill=fill_zebra if idx % 2 == 0 else None, border=b_cell, alignment=al_left,
+    # 2. Resultados por categoría
+    section("Resultados por categoría", ["Categoría", "Cantidad", "% del total", "Criterio"])
+    counts = df_completo["CATEGORIA_RIESGO"].value_counts() if total else pd.Series(dtype=int)
+    for categoria, estatus, criterio, bg, fg in _RESUMEN_CATEGORIAS:
+        n = int(counts.get(categoria, 0))
+        pct = (n / total) if total else 0
+        _write_cell(
+            ws, row, 1, categoria,
+            Font(name=font_name, size=10, bold=True, color=fg),
+            PatternFill(start_color=bg, end_color=bg, fill_type="solid"), border, left,
         )
+        _write_cell(ws, row, 2, n, bold_font, None, border, center)
+        c = ws.cell(row=row, column=3, value=pct)
+        c.number_format = "0.0%"
+        c.font, c.border, c.alignment = body_font, border, center
+        _write_cell(ws, row, 4, criterio, body_font, None, border, left)
+        row += 1
+    _write_cell(ws, row, 1, "TOTAL", bold_font, None, border, left)
+    _write_cell(ws, row, 2, total, bold_font, None, border, center)
+    c = ws.cell(row=row, column=3, value=1 if total else 0)
+    c.number_format = "0.0%"
+    c.font, c.border, c.alignment = bold_font, border, center
+    _write_cell(ws, row, 4, "", body_font, None, border, left)
+    row += 2
 
-    ws.row_dimensions[11].height = 12  # Fila separadora
+    # 3. Indicadores adicionales
+    section("Indicadores adicionales", ["Indicador", "Valor"])
+    n_revisar = int(df_completo["ESTATUS_AUDITORIA"].eq("REVISAR").sum()) if total else 0
+    line("Casos a revisar (críticos + huérfanas)", n_revisar, bold=True)
+    line("Discrepancias de identidad", int(df_completo["DISCREPANCIA_IDENTIDAD"].fillna(False).astype(bool).sum()) if total else 0)
+    line("Sin registro en el reporte", int(df_completo["ESTATUS_CUENTA_REPORTE"].eq("Sin registro").sum()) if total else 0)
+    line("Cuentas activas en el reporte", int(df_completo["ESTATUS_CUENTA_REPORTE"].eq("Activa").sum()) if total else 0)
+    if metrics is not None:
+        line("Con login válido", metrics.total_con_login_valido)
+        line("Sin fecha de baja válida", metrics.total_sin_fecha_baja)
+    dias = pd.to_numeric(df_completo["DIAS_POST_BAJA"], errors="coerce").dropna() if total else pd.Series(dtype=float)
+    line("Accesos post-baja detectados", int(len(dias)))
+    if len(dias):
+        line("Días post-baja (máximo)", int(dias.max()))
+        line("Días post-baja (promedio)", round(float(dias.mean()), 1))
 
-    # ---------------------------------------------------------
-    # SECCIÓN 2: Diccionario de Estatus y Categorías de Riesgo
-    # ---------------------------------------------------------
-    ws.row_dimensions[12].height = 26
-    _write_merged_cell(
-        ws, "A12:E12",
-        value="2. DICCIONARIO DE ESTATUS Y CATEGORÍAS DE RIESGO OPERATIVO",
-        font=f_sec, fill=fill_sec, alignment=al_sec,
-    )
-
-    ws.row_dimensions[13].height = 26
-    headers_sec2 = [
-        ("Categoría de Riesgo", 1),
-        ("Estatus Auditoría", 2),
-        ("Condición Lógica", 3),
-        ("Impacto Operativo", 4),
-        ("Acción Requerida", 5),
-    ]
-    for h_text, col_i in headers_sec2:
-        _write_cell(ws, 13, col_i, h_text, font=f_th, fill=fill_th, border=b_cell, alignment=al_center)
-
-    risk_rows = [
-        (
-            "CRÍTICO - RIESGO ACTIVO",
-            "REVISAR",
-            "Active == 1 Y Last Login > Fecha Baja",
-            "Acceso no autorizado confirmado con cuenta aún habilitada.",
-            "Desactivación inmediata de credenciales",
-            fill_critico, f_critico, f_critico,
-        ),
-        (
-            "ALTO - CUENTA HUÉRFANA",
-            "REVISAR",
-            "Active == 1 Y Fecha Baja válida Y Login <= Baja",
-            "La cuenta sigue encendida tras el cese laboral (sin acceso detectado aún).",
-            "Desactivar la cuenta preventivamente",
-            fill_alto, f_alto, f_alto,
-        ),
-        (
-            "MEDIO - INCIDENTE PASADO",
-            "INCIDENTE RESUELTO",
-            "Active == 0 Y Last Login > Fecha Baja",
-            "El usuario ingresó tras su cese, pero la cuenta ya fue remediada/apagada.",
-            "Registro documental para auditoría interna; no requiere acción de bloqueo.",
-            fill_medio, f_medio, f_medio,
-        ),
-        (
-            "POSIBLE REINGRESO",
-            "OK",
-            "Múltiples registros; al menos uno vigente sin fecha de baja.",
-            "El usuario volvió a laborar en la empresa; los accesos son legítimos.",
-            "Informativo. No requiere intervención de seguridad.",
-            fill_reingreso, f_reingreso, f_reingreso,
-        ),
-        (
-            "CONFORME",
-            "OK",
-            "Active == 0 Y Last Login <= Fecha Baja (o Sin registro)",
-            "Proceso de baja ejecutado conforme a la política de control de accesos.",
-            "Ninguna.",
-            fill_conforme, f_conforme, f_conforme,
-        ),
-    ]
-
-    for idx, (riesgo, estatus, condicion, impacto, accion, r_fill, r_font, a_font) in enumerate(risk_rows, start=14):
-        ws.row_dimensions[idx].height = 36
-        _write_cell(ws, idx, 1, riesgo, font=r_font, fill=r_fill, border=b_cell, alignment=al_center)
-        _write_cell(ws, idx, 2, estatus, font=r_font, fill=r_fill, border=b_cell, alignment=al_center)
-        _write_cell(ws, idx, 3, condicion, font=f_body_code, border=b_cell, alignment=al_center)
-        _write_cell(ws, idx, 4, impacto, font=f_body, border=b_cell, alignment=al_left)
-        _write_cell(ws, idx, 5, accion, font=a_font, border=b_cell, alignment=al_left)
-
-    ws.row_dimensions[19].height = 12  # Fila separadora
-
-    # ---------------------------------------------------------
-    # SECCIÓN 3: Reglas Técnicas Aplicadas
-    # ---------------------------------------------------------
-    ws.row_dimensions[20].height = 26
-    _write_merged_cell(
-        ws, "A20:E20",
-        value="3. REGLAS TÉCNICAS Y METODOLOGÍA DE PROCESAMIENTO",
-        font=f_sec, fill=fill_sec, alignment=al_sec,
-    )
-
-    ws.row_dimensions[21].height = 24
-    _write_cell(ws, 21, 1, "Regla Técnica", font=f_th, fill=fill_th, border=b_cell, alignment=al_center)
-    _write_cell(ws, 21, 2, "Mecanismo de Evaluación", font=f_th, fill=fill_th, border=b_cell, alignment=al_center)
-    _write_merged_cell(
-        ws, "C21:E21",
-        value="Descripción Metodológica y Justificación de Negocio",
-        font=f_th, fill=fill_th, border=b_cell, alignment=al_center,
-    )
-
-    rules_info = [
-        (
-            "Corte Calendario",
-            "Nivel Día (YYYY-MM-DD)",
-            "Las fechas se evalúan a nivel día (YYYY-MM-DD), descartando horas para no penalizar accesos ocurridos durante el último día laboral.",
-        ),
-        (
-            "Priorización de Bajas",
-            "Fecha Más Reciente (Max)",
-            "Ante registros con múltiples bajas, se evalúa contra la fecha de cese más reciente.",
-        ),
-        (
-            "Validación Compuesta",
-            "Correo + Nombre Normalizado",
-            "Cruce estricto por Correo Corporativo + Nombre Completo (insensible a acentos, mayúsculas o dobles espacios) para evitar colisiones entre homónimos o cuentas reasignadas.",
-        ),
-    ]
-
-    for idx, (regla, mecanismo, desc) in enumerate(rules_info, start=22):
-        ws.row_dimensions[idx].height = 32
-        _write_cell(ws, idx, 1, regla, font=f_body_bold, fill=fill_zebra, border=b_cell, alignment=al_center)
-        _write_cell(ws, idx, 2, mecanismo, font=f_body, fill=fill_zebra, border=b_cell, alignment=al_center)
-        _write_merged_cell(
-            ws, f"C{idx}:E{idx}",
-            value=desc,
-            font=f_body, fill=fill_zebra if idx % 2 == 0 else None, border=b_cell, alignment=al_left,
-        )
-
-    ws.row_dimensions[25].height = 12  # Fila separadora
-
-    # Footer de control interno
-    ws.row_dimensions[26].height = 22
-    _write_merged_cell(
-        ws, "A26:E26",
-        value="Nota de Control Interno: Reporte generado automáticamente por la herramienta de auditoría de accesos. Las acciones requeridas deben canalizarse a través de las mesas de servicio de TI / Ciberseguridad y Gestión de Talento.",
-        font=f_footer, fill=fill_footer, border=b_cell, alignment=al_center,
-    )
-
-    # ---------------------------------------------------------
-    # Dimensiones de columnas configuradas para lectura cómoda
-    # ---------------------------------------------------------
-    ws.column_dimensions["A"].width = 28
-    ws.column_dimensions["B"].width = 24
-    ws.column_dimensions["C"].width = 38
-    ws.column_dimensions["D"].width = 44
-    ws.column_dimensions["E"].width = 48
-
+    ws.column_dimensions["A"].width = 42
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 36
     return ws
 
 
@@ -1535,7 +1368,7 @@ def apply_professional_excel_styling(workbook: openpyxl.Workbook) -> None:
     sin_registro_font = Font(name="Segoe UI", size=9, italic=True, color="FF6B7280")
 
     for sheetname in workbook.sheetnames:
-        if sheetname == "Glosario_y_Criterios":
+        if sheetname == RESUMEN_SHEET:
             continue
         ws = workbook[sheetname]
         ws.views.sheetView[0].showGridLines = True
@@ -1676,10 +1509,11 @@ def export_to_excel(
     output_path: Path | str,
     df_incidentes_pasados: Optional[pd.DataFrame] = None,
     df_reingresos: Optional[pd.DataFrame] = None,
+    metrics: Optional[AuditMetrics] = None,
 ) -> Path:
     """
     Genera el archivo final Excel con cinco pestañas:
-    - 'Glosario_y_Criterios' (primera pestaña: referencia técnica y ejecutiva)
+    - 'Resumen_Auditoria' (primera pestaña: datos cuantitativos de la ejecución)
     - 'Auditoria_Completa'
     - 'Riesgos_Activos'
     - 'Incidentes_Pasados'
@@ -1718,9 +1552,9 @@ def export_to_excel(
         df_incidentes_pasados.to_excel(writer, sheet_name="Incidentes_Pasados", index=False)
         df_reingresos.to_excel(writer, sheet_name="Reingresos", index=False)
 
-    # 2. Cargar con openpyxl para inyectar Glosario en index 0 y estilizar
+    # 2. Cargar con openpyxl para inyectar el Resumen en index 0 y estilizar
     wb = openpyxl.load_workbook(dest)
-    create_glosario_sheet(wb)
+    create_resumen_sheet(wb, df_completo, metrics)
     apply_professional_excel_styling(wb)
     wb.active = 0
     wb.save(dest)
@@ -1831,7 +1665,7 @@ def print_summary_box(metrics: AuditMetrics, output_file: Path) -> None:
     print(f" (Mismo correo en reporte pero con distinto nombre / cuenta reasignada)")
     print(divider)
     print(f" Tiempo total de ejecución                    : {metrics.tiempo_total_segundos:>7.3f} s")
-    print(f" Archivo Excel generado satisfactoriamente (5 pestañas, primera: 'Glosario_y_Criterios'):")
+    print(f" Archivo Excel generado satisfactoriamente (5 pestañas, primera: 'Resumen_Auditoria'):")
     print(f" -> {output_file.resolve()}")
     print(border + "\n")
 
@@ -1840,7 +1674,12 @@ def print_summary_box(metrics: AuditMetrics, output_file: Path) -> None:
 # CONFIGURACIÓN PERSISTENTE Y RUTAS INTERACTIVAS
 # ============================================================================
 
-DEFAULT_OUTPUT_NAME = "Auditoria_Accesos_Resultado.xlsx"
+OUTPUT_NAME_PREFIX = "Auditoria_Accesos_Resultado"
+
+
+def build_output_name(day: Optional[datetime] = None) -> str:
+    """Nombre del archivo de resultados con la fecha de la auditoría (AAAA-MM-DD)."""
+    return f"{OUTPUT_NAME_PREFIX}_{(day or datetime.now()).strftime('%Y-%m-%d')}.xlsx"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
@@ -1967,7 +1806,7 @@ def resolve_output_dir(config: Dict[str, str]) -> Path:
 def run_audit_pipeline(
     universo_path: Path | str,
     reporte_path: Path | str,
-    output_path: Path | str = "Auditoria_Accesos_Resultado.xlsx",
+    output_path: Optional[Path | str] = None,
     hoja_universo: str = "BajasU",
 ) -> tuple[Path, AuditMetrics]:
     """
@@ -1977,14 +1816,14 @@ def run_audit_pipeline(
     3. Mapeo resiliente de columnas por texto (Username, Full Name, Active, Login, etc.)
     4. Consolidación de logins por llave compuesta (Correo + Nombre)
     5. Evaluación de matriz de riesgo tripartita (Riesgos Activos, Incidentes Pasados, Reingresos)
-    6. Generación y formateo profesional de Excel (5 pestañas: Glosario_y_Criterios,
+    6. Generación y formateo profesional de Excel (5 pestañas: Resumen_Auditoria,
        Auditoria_Completa, Riesgos_Activos, Incidentes_Pasados, Reingresos)
     """
     start_time = time.perf_counter()
 
     uni_path = Path(universo_path)
     rep_path = Path(reporte_path)
-    out_path = Path(output_path)
+    out_path = Path(output_path) if output_path else Path(build_output_name())
 
     print(f"\n[+] Iniciando proceso de auditoría con validación compuesta y matriz de riesgo...")
     print(f"    * Archivo Universo          : {uni_path.name}")
@@ -2028,8 +1867,13 @@ def run_audit_pipeline(
         consolidated_logins=consolidated_logins,
     )
 
-    # 5. Exportación y formateo profesional en 4 pestañas
-    saved_file = export_to_excel(df_completo, df_riesgos_activos, out_path)
+    # 5. Exportación y formateo profesional en 5 pestañas
+    metrics.fecha_auditoria = datetime.now().strftime("%d/%m/%Y")
+    metrics.universo_archivo = uni_path.name
+    metrics.reporte_archivo = rep_path.name
+    metrics.total_universo_original = len(df_uni)
+    metrics.total_registros_reporte = len(df_rep)
+    saved_file = export_to_excel(df_completo, df_riesgos_activos, out_path, metrics=metrics)
     metrics.output_path = str(saved_file.resolve())
     metrics.tiempo_total_segundos = round(time.perf_counter() - start_time, 4)
 
@@ -2122,7 +1966,7 @@ def main() -> int:
             else:
                 output_dir = resolve_output_dir(config)
             config["output_dir"] = str(output_dir.resolve())
-            output_path = output_dir / DEFAULT_OUTPUT_NAME
+            output_path = output_dir / build_output_name()
 
         config["universo"] = str(Path(universo_file).resolve())
         save_config(config)

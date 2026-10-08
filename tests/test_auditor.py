@@ -22,7 +22,6 @@ if str(ROOT_DIR) not in sys.path:
 from auditor_bajas import (
     clean_identifier_series,
     consolidate_logins,
-    create_glosario_sheet,
     execute_audit,
     find_column_by_substring,
     parse_active_series,
@@ -322,8 +321,8 @@ def test_real_workspace_files(tmp_path):
 
         # Validar estructura y hojas del archivo generado
         wb = openpyxl.load_workbook(saved_file, data_only=True)
-        assert wb.sheetnames[0] == "Glosario_y_Criterios"
-        assert "Glosario_y_Criterios" in wb.sheetnames
+        assert wb.sheetnames[0] == "Resumen_Auditoria"
+        assert "Resumen_Auditoria" in wb.sheetnames
         assert "Auditoria_Completa" in wb.sheetnames
         assert "Riesgos_Activos" in wb.sheetnames
         assert "Incidentes_Pasados" in wb.sheetnames
@@ -343,32 +342,6 @@ def test_real_workspace_files(tmp_path):
                 out_file.unlink()
             except Exception:
                 pass
-
-
-def test_glosario_y_criterios_unitario():
-    """Valida la generación aislada de la hoja de Glosario y Criterios."""
-    wb = openpyxl.Workbook()
-    ws = create_glosario_sheet(wb)
-
-    assert wb.sheetnames[0] == "Glosario_y_Criterios"
-    assert ws.title == "Glosario_y_Criterios"
-    assert ws.views.sheetView[0].showGridLines is True
-
-    # Validar secciones presentes
-    assert "DICCIONARIO DE AUDITORÍA" in str(ws["A1"].value).upper()
-    assert "1. ESTRUCTURA DEL LIBRO" in str(ws["A4"].value).upper()
-    assert "2. DICCIONARIO DE ESTATUS" in str(ws["A12"].value).upper()
-    assert "3. REGLAS TÉCNICAS" in str(ws["A20"].value).upper()
-
-    # Validar categorías críticas y altas
-    assert ws["A14"].value == "CRÍTICO - RIESGO ACTIVO"
-    assert ws["B14"].value == "REVISAR"
-    assert ws["A14"].fill.start_color.rgb == "FFFEE2E2"
-
-    assert ws["A15"].value == "ALTO - CUENTA HUÉRFANA"
-    assert ws["B15"].value == "REVISAR"
-    assert ws["A15"].fill.start_color.rgb == "FFFEF3C7"
-
 
 
 def test_config_y_carpeta_resultados(tmp_path, monkeypatch):
