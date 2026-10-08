@@ -58,6 +58,7 @@ import argparse
 from dataclasses import dataclass
 from datetime import datetime
 import glob
+import json
 from html.parser import HTMLParser
 import os
 from pathlib import Path
@@ -1836,6 +1837,129 @@ def print_summary_box(metrics: AuditMetrics, output_file: Path) -> None:
 
 
 # ============================================================================
+# CONFIGURACIÓN PERSISTENTE Y RUTAS INTERACTIVAS
+# ============================================================================
+
+DEFAULT_OUTPUT_NAME = "Auditoria_Accesos_Resultado.xlsx"
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def get_config_path() -> Path:
+    """Ruta del archivo de configuración (fuera de la carpeta de scripts).
+
+    Se puede sobrescribir con la variable de entorno AUDITORIA_CONFIG.
+    """
+    override = os.environ.get("AUDITORIA_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".auditoria_accesos" / "config.json"
+
+
+def load_config() -> Dict[str, str]:
+    """Lee la configuración guardada; devuelve {} si no existe o es inválida."""
+    try:
+        data = json.loads(get_config_path().read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(config: Dict[str, str]) -> None:
+    """Guarda la configuración; un fallo de escritura nunca interrumpe la auditoría."""
+    path = get_config_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"[AVISO] No se pudo guardar la configuración en '{path}': {exc}")
+
+
+def _clean_path_input(raw: str) -> str:
+    """Quita espacios y comillas (típicas al arrastrar archivos a la consola)."""
+    return raw.strip().strip('"').strip("'").strip()
+
+
+def _ask(prompt: str) -> str:
+    """input() que lanza EOFError si no hay consola interactiva."""
+    return input(prompt)
+
+
+def _ask_yes_no(prompt: str, default: bool = True) -> bool:
+    suffix = "[S/n]" if default else "[s/N]"
+    while True:
+        answer = _ask(f"{prompt} {suffix}: ").strip().lower()
+        if not answer:
+            return default
+        if answer in ("s", "si", "sí", "y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        print("    Responda 's' o 'n'.")
+
+
+def _is_inside(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def prompt_universo_path(suggested: Optional[str] = None) -> str:
+    """Solicita la ruta del archivo Universo hasta obtener un archivo existente."""
+    while True:
+        hint = f" [{suggested}]" if suggested else ""
+        raw = _clean_path_input(_ask(f"Ruta del archivo Universo{hint}: "))
+        candidate = raw or (suggested or "")
+        if not candidate:
+            print("    Debe indicar una ruta.")
+            continue
+        path = Path(candidate).expanduser()
+        if path.is_file():
+            return str(path)
+        print(f"    [ERROR] No existe el archivo: '{path}'")
+
+
+def prompt_new_output_dir() -> Path:
+    """Solicita una carpeta de resultados fuera de la carpeta de scripts y la crea previa confirmación."""
+    while True:
+        raw = _clean_path_input(_ask("Ruta de la carpeta de resultados: "))
+        if not raw:
+            print("    Debe indicar una ruta.")
+            continue
+        folder = Path(raw).expanduser()
+        if _is_inside(folder, SCRIPT_DIR):
+            print(f"    [ERROR] La carpeta debe estar fuera de la carpeta de scripts ('{SCRIPT_DIR}').")
+            continue
+        if folder.exists() and not folder.is_dir():
+            print(f"    [ERROR] '{folder}' existe y no es una carpeta.")
+            continue
+        if not folder.exists():
+            if not _ask_yes_no(f"La carpeta '{folder}' no existe. ¿Crearla?"):
+                continue
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                print(f"    [ERROR] No se pudo crear la carpeta: {exc}")
+                continue
+        return folder
+
+
+def resolve_output_dir(config: Dict[str, str]) -> Path:
+    """Primera vez: pregunta la ruta. Siguientes: confirma la última o permite cambiarla."""
+    last = config.get("output_dir")
+    if last:
+        last_path = Path(last)
+        if _ask_yes_no(f"¿Guardar los resultados en '{last_path}'?"):
+            if not last_path.exists():
+                if not _ask_yes_no(f"La carpeta '{last_path}' ya no existe. ¿Crearla?"):
+                    return resolve_output_dir({})
+                last_path.mkdir(parents=True, exist_ok=True)
+            return last_path
+    return prompt_new_output_dir()
+
+
+# ============================================================================
 # FUNCIÓN PRINCIPAL Y PIPELINE COMPLETO
 # ============================================================================
 
@@ -1944,8 +2068,14 @@ def main() -> int:
         "-o",
         "--salida",
         type=str,
-        default="Auditoria_Accesos_Resultado.xlsx",
-        help="Ruta para el archivo Excel de resultados",
+        default=None,
+        help="Ruta completa del Excel de resultados (omite las preguntas de carpeta)",
+    )
+    parser.add_argument(
+        "--carpeta-resultados",
+        type=str,
+        default=None,
+        help="Carpeta de resultados (omite la pregunta interactiva y se recuerda para la próxima vez)",
     )
     parser.add_argument(
         "--auto",
@@ -1954,49 +2084,61 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+    config = load_config()
 
-    universo_file = args.universo
-    reporte_file = args.reporte
+    try:
+        # 1. Archivo Universo: argumento, o pregunta (sugiriendo detección automática / última ruta)
+        universo_file = args.universo
+        if not universo_file:
+            auto_uni, auto_rep = auto_detect_input_files(".")
+            suggested = str(auto_uni) if auto_uni else config.get("universo")
+            universo_file = prompt_universo_path(suggested)
+            if not args.reporte and auto_rep:
+                args.reporte = str(auto_rep)
+                print(f"[INFO] Reporte de Logins detectado automáticamente: {auto_rep.name}")
 
-    # Si falta alguno, intentar auto-detección
-    if not universo_file or not reporte_file:
-        auto_uni, auto_rep = auto_detect_input_files(".")
-        if auto_uni and not universo_file:
-            universo_file = str(auto_uni)
-            print(f"[INFO] Universo detectado automáticamente: {auto_uni.name}")
-        if auto_rep and not reporte_file:
-            reporte_file = str(auto_rep)
-            print(f"[INFO] Reporte de Logins detectado automáticamente: {auto_rep.name}")
+        # 2. Reporte de logins
+        reporte_file = args.reporte
+        if not reporte_file:
+            reporte_file = _clean_path_input(_ask("Ingrese la ruta del Archivo Reporte de Logins: "))
 
-    # Si todavía falta alguno y estamos en modo interactivo, solicitar al usuario
-    if not universo_file:
-        try:
-            universo_file = input("Ingrese la ruta del Archivo Universo: ").strip()
-        except EOFError:
-            print("\n[ERROR] No se especificó la ruta del archivo Universo (--universo).", file=sys.stderr)
+        if not Path(universo_file).is_file():
+            print(f"\n[ERROR] El archivo Universo '{universo_file}' no existe.", file=sys.stderr)
+            return 1
+        if not Path(reporte_file).is_file():
+            print(f"\n[ERROR] El archivo Reporte de Logins '{reporte_file}' no existe.", file=sys.stderr)
             return 1
 
-    if not reporte_file:
-        try:
-            reporte_file = input("Ingrese la ruta del Archivo Reporte de Logins: ").strip()
-        except EOFError:
-            print("\n[ERROR] No se especificó la ruta del archivo Reporte de Logins (--reporte).", file=sys.stderr)
-            return 1
+        # 3. Destino de resultados
+        if args.salida:
+            output_path = Path(args.salida)
+        else:
+            if args.carpeta_resultados:
+                output_dir = Path(args.carpeta_resultados).expanduser()
+                if _is_inside(output_dir, SCRIPT_DIR):
+                    print("\n[ERROR] La carpeta de resultados debe estar fuera de la carpeta de scripts.", file=sys.stderr)
+                    return 1
+                output_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                output_dir = resolve_output_dir(config)
+            config["output_dir"] = str(output_dir.resolve())
+            output_path = output_dir / DEFAULT_OUTPUT_NAME
 
-    # Validar que los archivos existan
-    if not Path(universo_file).exists():
-        print(f"\n[ERROR] El archivo Universo '{universo_file}' no existe.", file=sys.stderr)
-        return 1
-
-    if not Path(reporte_file).exists():
-        print(f"\n[ERROR] El archivo Reporte de Logins '{reporte_file}' no existe.", file=sys.stderr)
+        config["universo"] = str(Path(universo_file).resolve())
+        save_config(config)
+    except EOFError:
+        print(
+            "\n[ERROR] Sin consola interactiva: indique --universo, --reporte y "
+            "--carpeta-resultados (o --salida).",
+            file=sys.stderr,
+        )
         return 1
 
     try:
         run_audit_pipeline(
             universo_path=universo_file,
             reporte_path=reporte_file,
-            output_path=args.salida,
+            output_path=output_path,
             hoja_universo=args.hoja_universo,
         )
         return 0
