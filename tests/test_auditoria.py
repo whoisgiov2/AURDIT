@@ -21,10 +21,11 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from auditor_bajas import (
+    AuditMetrics,
     clean_identifier_series,
     clean_name_series,
     consolidate_logins,
-    create_glosario_sheet,
+    create_resumen_sheet,
     deduplicate_universo,
     execute_audit,
     export_to_excel,
@@ -315,14 +316,14 @@ def test_criterios_validacion_matriz_riesgo(tmp_path):
     assert out_file.exists()
     wb = openpyxl.load_workbook(out_file, data_only=True)
     expected_sheets = [
-        "Glosario_y_Criterios",
+        "Resumen_Auditoria",
         "Auditoria_Completa",
         "Riesgos_Activos",
         "Incidentes_Pasados",
         "Reingresos",
     ]
     assert wb.sheetnames == expected_sheets
-    assert wb.sheetnames[0] == "Glosario_y_Criterios"
+    assert wb.sheetnames[0] == "Resumen_Auditoria"
 
     # Pestaña 2: Riesgos_Activos debe contener USUARIO ACTIVO y USUARIO HUERFANA, pero NO USUARIO RESUELTO
     ws_activos = wb["Riesgos_Activos"]
@@ -348,7 +349,7 @@ def test_criterios_validacion_matriz_riesgo(tmp_path):
 def test_caso_4_real_workspace_files(tmp_path):
     """
     Valida la ejecución con los archivos reales del proyecto y verifica
-    que las 5 pestañas ('Glosario_y_Criterios', 'Auditoria_Completa', 'Riesgos_Activos',
+    que las 5 pestañas ('Resumen_Auditoria', 'Auditoria_Completa', 'Riesgos_Activos',
     'Incidentes_Pasados', 'Reingresos') se generen correctamente.
     """
     uni_path = ROOT_DIR / "Universo_Usuarios_PROD_2.xlsx"
@@ -389,8 +390,8 @@ def test_caso_4_real_workspace_files(tmp_path):
         assert metrics.total_ok == 4936
 
         wb = openpyxl.load_workbook(saved_file, data_only=True)
-        assert wb.sheetnames[0] == "Glosario_y_Criterios"
-        assert "Glosario_y_Criterios" in wb.sheetnames
+        assert wb.sheetnames[0] == "Resumen_Auditoria"
+        assert "Resumen_Auditoria" in wb.sheetnames
         assert "Auditoria_Completa" in wb.sheetnames
         assert "Riesgos_Activos" in wb.sheetnames
         assert "Incidentes_Pasados" in wb.sheetnames
@@ -412,84 +413,93 @@ def test_caso_4_real_workspace_files(tmp_path):
                 pass
 
 
-def test_caso_5_glosario_y_criterios_completo():
-    """
-    Valida exhaustivamente la pestaña 'Glosario_y_Criterios':
-    1. Que se inserte en la posición 0 del libro Excel.
-    2. Que contenga las 3 secciones obligatorias (Estructura, Diccionario y Reglas Técnicas).
-    3. Que contenga la matriz completa de riesgos (CRÍTICO, ALTO, MEDIO, POSIBLE REINGRESO, CONFORME).
-    4. Que los estilos visuales, colores de celda y anchos de columna estén configurados.
-    5. Que las líneas de cuadrícula estén activas y el texto esté ajustado (wrap_text).
-    """
+def _df_resumen():
+    categorias = (
+        ["CRÍTICO - RIESGO ACTIVO"] * 2
+        + ["ALTO - CUENTA HUÉRFANA"]
+        + ["MEDIO - INCIDENTE PASADO"] * 3
+        + ["POSIBLE REINGRESO"]
+        + ["CONFORME"] * 3
+    )
+    n = len(categorias)
+    return pd.DataFrame({
+        "CATEGORIA_RIESGO": categorias,
+        "ESTATUS_AUDITORIA": ["REVISAR"] * 3 + ["INCIDENTE RESUELTO"] * 3 + ["OK"] * 4,
+        "DISCREPANCIA_IDENTIDAD": [True] + [False] * (n - 1),
+        "ESTATUS_CUENTA_REPORTE": ["Activa"] * 3 + ["Inactiva"] * 5 + ["Sin registro"] * 2,
+        "DIAS_POST_BAJA": pd.array([10, 30, pd.NA, 5, 5, 5, pd.NA, pd.NA, pd.NA, pd.NA], dtype="Int64"),
+    })
+
+
+def _valores_hoja(ws):
+    return {
+        str(ws.cell(row=r, column=1).value): [ws.cell(row=r, column=c).value for c in range(2, 5)]
+        for r in range(1, ws.max_row + 1)
+        if ws.cell(row=r, column=1).value is not None
+    }
+
+
+def test_caso_5_resumen_auditoria_cuantitativo():
+    """La hoja de resumen es la primera y contiene conteos y porcentajes correctos."""
     wb = openpyxl.Workbook()
-    ws = create_glosario_sheet(wb)
+    metrics = AuditMetrics(
+        fecha_auditoria="08/10/2026",
+        universo_archivo="uni.xlsx",
+        reporte_archivo="report1.xlsx",
+        total_universo_original=12,
+        total_registros_reporte=30,
+        total_con_login_valido=6,
+        total_sin_fecha_baja=1,
+    )
+    ws = create_resumen_sheet(wb, _df_resumen(), metrics)
 
-    # 1. Posición y nombre
-    assert wb.sheetnames[0] == "Glosario_y_Criterios"
-    assert ws.title == "Glosario_y_Criterios"
-    assert ws.views.sheetView[0].showGridLines is True
+    assert wb.sheetnames[0] == "Resumen_Auditoria"
+    assert "08/10/2026" in str(ws["A1"].value)
 
-    # 2. Encabezados de sección
-    assert "DICCIONARIO DE AUDITORÍA" in str(ws["A1"].value).upper()
-    assert "1. ESTRUCTURA DEL LIBRO" in str(ws["A4"].value).upper()
-    assert "2. DICCIONARIO DE ESTATUS" in str(ws["A12"].value).upper()
-    assert "3. REGLAS TÉCNICAS" in str(ws["A20"].value).upper()
+    v = _valores_hoja(ws)
+    assert v["Registros originales del Universo"][0] == 12
+    assert v["Bajas antiguas depuradas"][0] == 2
+    assert v["Colaboradores evaluados"][0] == 10
+    assert v["Registros en el reporte de logins"][0] == 30
 
-    # 3. Contenido de Sección 1: Estructura del Libro (Pestañas)
-    pestañas_esperadas = [
-        "Glosario_y_Criterios",
-        "Riesgos_Activos",
-        "Incidentes_Pasados",
-        "Reingresos",
-        "Auditoria_Completa",
-    ]
-    pestañas_encontradas = [ws.cell(row=r, column=1).value for r in range(6, 11)]
-    assert pestañas_encontradas == pestañas_esperadas
+    assert v["CRÍTICO - RIESGO ACTIVO"][0] == 2
+    assert v["ALTO - CUENTA HUÉRFANA"][0] == 1
+    assert v["MEDIO - INCIDENTE PASADO"][0] == 3
+    assert v["POSIBLE REINGRESO"][0] == 1
+    assert v["CONFORME"][0] == 3
+    assert v["CRÍTICO - RIESGO ACTIVO"][1] == pytest.approx(0.2)
+    assert v["TOTAL"][0] == 10
 
-    # 4. Contenido de Sección 2: Matriz de Riesgo y Acciones
-    riesgos_esperados = [
-        "CRÍTICO - RIESGO ACTIVO",
-        "ALTO - CUENTA HUÉRFANA",
-        "MEDIO - INCIDENTE PASADO",
-        "POSIBLE REINGRESO",
-        "CONFORME",
-    ]
-    riesgos_encontrados = [ws.cell(row=r, column=1).value for r in range(14, 19)]
-    assert riesgos_encontrados == riesgos_esperados
+    assert v["Casos a revisar (críticos + huérfanas)"][0] == 3
+    assert v["Discrepancias de identidad"][0] == 1
+    assert v["Sin registro en el reporte"][0] == 2
+    assert v["Accesos post-baja detectados"][0] == 5
+    assert v["Días post-baja (máximo)"][0] == 30
+    assert v["Días post-baja (promedio)"][0] == 11.0
 
-    estatus_esperados = ["REVISAR", "REVISAR", "INCIDENTE RESUELTO", "OK", "OK"]
-    estatus_encontrados = [ws.cell(row=r, column=2).value for r in range(14, 19)]
-    assert estatus_encontrados == estatus_esperados
+    fills = {ws.cell(row=r, column=1).value: ws.cell(row=r, column=1).fill.start_color.rgb for r in range(1, ws.max_row + 1)}
+    assert fills["CRÍTICO - RIESGO ACTIVO"] == "FFFEE2E2"
+    assert fills["CONFORME"] == "FFDCFCE7"
 
-    # Validar condiciones lógicas
-    assert "Active == 1" in str(ws.cell(row=14, column=3).value)
-    assert "Last Login > Fecha Baja" in str(ws.cell(row=14, column=3).value)
-    assert "Login <= Baja" in str(ws.cell(row=15, column=3).value)
 
-    # Validar colores de celdas semánticos
-    fill_critico = ws.cell(row=14, column=1).fill.start_color.rgb
-    fill_alto = ws.cell(row=15, column=1).fill.start_color.rgb
-    fill_medio = ws.cell(row=16, column=1).fill.start_color.rgb
-    fill_reingreso = ws.cell(row=17, column=1).fill.start_color.rgb
-    fill_conforme = ws.cell(row=18, column=1).fill.start_color.rgb
+def test_resumen_sin_metrics_y_sin_registros():
+    """Sin métricas de ejecución o con DataFrame vacío no falla."""
+    wb = openpyxl.Workbook()
+    ws = create_resumen_sheet(wb, _df_resumen())
+    assert _valores_hoja(ws)["Colaboradores evaluados"][0] == 10
+    assert "Registros originales del Universo" not in _valores_hoja(ws)
 
-    assert fill_critico == "FFFEE2E2"
-    assert fill_alto == "FFFEF3C7"
-    assert fill_medio == "FFF1F5F9"
-    assert fill_reingreso == "FFE0F2FE"
-    assert fill_conforme == "FFDCFCE7"
+    wb2 = openpyxl.Workbook()
+    ws2 = create_resumen_sheet(wb2, _df_resumen().iloc[0:0])
+    assert _valores_hoja(ws2)["TOTAL"][0] == 0
 
-    # 5. Contenido de Sección 3: Reglas Técnicas
-    reglas_esperadas = ["Corte Calendario", "Priorización de Bajas", "Validación Compuesta"]
-    reglas_encontradas = [ws.cell(row=r, column=1).value for r in range(22, 25)]
-    assert reglas_encontradas == reglas_esperadas
 
-    # 6. Anchos de columna y wrap_text
-    for col_letter in ["A", "B", "C", "D", "E"]:
-        assert ws.column_dimensions[col_letter].width >= 20
+def test_nombre_archivo_con_fecha():
+    from datetime import datetime
+    from auditor_bajas import build_output_name
 
-    assert ws.cell(row=14, column=4).alignment.wrap_text is True
-    assert ws.cell(row=14, column=5).alignment.wrap_text is True
+    assert build_output_name(datetime(2026, 10, 8)) == "Auditoria_Accesos_Resultado_2026-10-08.xlsx"
+    assert build_output_name().startswith("Auditoria_Accesos_Resultado_")
 
 
 def test_fechas_de_baja_multiples():

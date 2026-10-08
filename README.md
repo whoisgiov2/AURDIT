@@ -31,7 +31,7 @@ Sobre ambos aplica:
 - Validación compuesta (correo + nombre) para evitar falsos positivos por cuentas compartidas o reasignadas.
 - Matriz de riesgo con cinco categorías.
 
-El resultado es el libro `Auditoria_Accesos_Resultado.xlsx` con cinco pestañas.
+El resultado es el libro `Auditoria_Accesos_Resultado_AAAA-MM-DD.xlsx` (con la fecha de la auditoría) con cinco pestañas.
 
 ## 2. Requisitos e instalación
 
@@ -58,7 +58,7 @@ En Windows también puede ejecutarse `AUDIT.bat`, que reenvía los argumentos a 
    - **Primera vez:** pide la ruta y, si la carpeta no existe, pregunta antes de crearla. La carpeta debe estar fuera de la carpeta de scripts; de lo contrario se rechaza.
    - **Ejecuciones siguientes:** pregunta si los resultados se guardan en la última carpeta usada. Si se responde que no, pide una nueva ruta (con las mismas validaciones) y la recuerda.
 
-El archivo de resultados se guarda como `Auditoria_Accesos_Resultado.xlsx` dentro de la carpeta elegida.
+El archivo de resultados se guarda como `Auditoria_Accesos_Resultado_AAAA-MM-DD.xlsx` (fecha del día de la auditoría) dentro de la carpeta elegida. Si se ejecuta más de una vez el mismo día, el archivo se sobrescribe.
 
 ### Configuración guardada
 
@@ -212,11 +212,11 @@ Notas:
 
 ## 7. Salida
 
-El archivo `Auditoria_Accesos_Resultado.xlsx` contiene cinco pestañas:
+El archivo `Auditoria_Accesos_Resultado_AAAA-MM-DD.xlsx` contiene cinco pestañas:
 
 | # | Pestaña | Contenido |
 | :---: | :--- | :--- |
-| 1 | `Glosario_y_Criterios` | Estructura del libro, diccionario de estatus con condiciones, impacto y acciones, y reglas técnicas (corte calendario, baja más reciente, validación compuesta). |
+| 1 | `Resumen_Auditoria` | Datos cuantitativos de la ejecución: fecha, archivos de entrada, volumen procesado, cantidad y porcentaje por categoría de riesgo, e indicadores adicionales (casos a revisar, discrepancias de identidad, sin registro, días post-baja máximo y promedio). |
 | 2 | `Auditoria_Completa` | Padrón deduplicado con todas las columnas originales más las columnas de auditoría. |
 | 3 | `Riesgos_Activos` | Casos `CRÍTICO - RIESGO ACTIVO` y `ALTO - CUENTA HUÉRFANA`, ordenados por severidad y luego por días post-baja descendente. |
 | 4 | `Incidentes_Pasados` | Casos `MEDIO - INCIDENTE PASADO`, ordenados por último login descendente. |
@@ -254,12 +254,12 @@ Encabezados oscuros (`#1F2937`), primera fila inmovilizada, ancho de columnas aj
 pytest -v
 ```
 
-La suite contiene 17 pruebas en `tests/test_auditoria.py` y `tests/test_auditor.py`. Dos de ellas validan los archivos reales de producción y se omiten (`skipped`) si esos archivos no están presentes en el entorno, por lo que en un clon limpio el resultado esperado es 15 aprobadas y 2 omitidas.
+La suite contiene 18 pruebas en `tests/test_auditoria.py` y `tests/test_auditor.py`. Dos de ellas validan los archivos reales de producción y se omiten (`skipped`) si esos archivos no están presentes en el entorno, por lo que en un clon limpio el resultado esperado es 16 aprobadas y 2 omitidas.
 
 | Archivo | Cobertura |
 | :--- | :--- |
-| `tests/test_auditoria.py` | Discrepancia de identidad con mismo correo y nombres distintos; normalización de acentos y espacios; cuenta activa post-baja; criterios de la matriz de riesgo; archivos reales del espacio de trabajo; contenido del glosario; múltiples fechas de baja; login más cercano; desempate hacia el login posterior. |
-| `tests/test_auditor.py` | Configuración persistente y selección de carpeta de resultados; parseo de fechas (`DD/MM/YYYY`, ISO, vacíos); parseo de `Active`; columnas fantasma y cabeceras truncadas; consolidación de múltiples logins; matriz de riesgo integrada; archivos reales del repositorio; creación aislada del glosario. |
+| `tests/test_auditoria.py` | Discrepancia de identidad con mismo correo y nombres distintos; normalización de acentos y espacios; cuenta activa post-baja; criterios de la matriz de riesgo; archivos reales del espacio de trabajo; contenido cuantitativo de la hoja de resumen y nombre de archivo con fecha; múltiples fechas de baja; login más cercano; desempate hacia el login posterior. |
+| `tests/test_auditor.py` | Configuración persistente y selección de carpeta de resultados; parseo de fechas (`DD/MM/YYYY`, ISO, vacíos); parseo de `Active`; columnas fantasma y cabeceras truncadas; consolidación de múltiples logins; matriz de riesgo integrada; archivos reales del repositorio. |
 
 ## 9. Estructura del repositorio
 
