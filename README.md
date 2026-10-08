@@ -1,189 +1,268 @@
-# Auditoría de Accesos Post-Baja (Leaver Access Review Automation)
+# Auditoría de Accesos Post-Baja
 
-Herramienta en Python de alto rendimiento y grado de producción para la automatización del proceso de auditoría de seguridad, detección de cuentas huérfanas, conciliación de accesos pos-desvinculación (*Leaver Access Review*) y clasificación tripartita de riesgos de ciberseguridad.
+Herramienta en Python para la auditoría de accesos posteriores a la baja de colaboradores (*Leaver Access Review*). Cruza el padrón de bajas de la organización con un reporte de logins exportado desde un Identity Provider, clasifica cada caso según una matriz de riesgo y genera un libro Excel con el resultado.
 
----
+## Contenido
 
-## 📋 Objetivo Principal
-
-El sistema procesa y cruza automáticamente de forma **vectorizada** dos orígenes de datos:
-1. **Archivo Universo:** Padrón maestro de empleados y bajas de la organización (pestaña obligatoria `'BajasU'`).
-2. **Archivo Reporte de Logins:** Reporte con nombre dinámico (`report<timestamp>.*`) exportado desde Identity Providers (Salesforce, CRM, Active Directory, Okta, etc.) en formatos Excel (`.xlsx` / `.xls`), tablas HTML (`.xls`) o `.csv`.
-
-Aplica un **Algoritmo Cronológico de Deduplicación**, **Validación Compuesta Anticolisiones** y una **Matriz de Riesgo Tripartita**, generando un libro Excel ejecutivo (`Auditoria_Accesos_Resultado.xlsx`) compuesto por **5 pestañas** con formateo profesional openpyxl, glosario metodológico integrado y semáforos visuales de riesgo.
-
----
-
-## ⚙️ Estructura de Entradas y Preprocesamiento Defensivo
-
-### 1. Archivo Universo (Padrón Maestro)
-- **Pestaña obligatoria:** `'BajasU'` (detección exacta o por coincidencia de subcadena).
-- **Columna C (Índice 2):** Nombre completo del colaborador (`NOMBRE`).
-- **Columna D (Índice 3):** `FECHA_BAJA` (soporta DD/MM/YYYY con o sin hora, marcas temporales Unix y formato ISO YYYY-MM-DD).
-- **Columna J (Índice 9):** Correo corporativo (incluso con cabeceras genéricas como `(No column name)` o `Unnamed: 9`).
-- **Validación defensiva:** Requiere un mínimo de 10 columnas y descarta filas vacías automáticamente.
-
-### 2. Archivo Reporte de Logins
-- **Formatos:** Libros Excel (pestaña `'in'` o primera pestaña disponible), tablas HTML exportadas con extensión `.xls` y archivos `.csv`.
-- **Preprocesamiento Defensivo Obligatorio:**
-  - Aplica `df.dropna(how='all', axis=1)` inmediatamente para purgar columnas fantasma generadas por celdas combinadas o desalineadas en exportaciones web.
-  - Elimina filas completamente vacías y normaliza nombres de columnas (recorte de espacios).
-- **Mapeo Resiliente de Columnas (búsqueda insensible a mayúsculas y acentos):**
-  - **`Full Name`:** Columna con `"full name"`, `"nombre"`, `"name"` o `"empleado"` (Índice 0 por defecto).
-  - **`Username`:** Columna con `"username"`, `"usuario"`, `"email"` o `"correo"` (Índice 2 por defecto).
-  - **`Active`:** Columna con `"active"` o `"activo"`. Parseo binario robusto (`1` o `0`), aceptando cadenas de texto (`'1'`, `'true'`, `'si'`, `'activo'`).
-  - **`Last Login`:** Columna con `"last login"`, `"ultimo login"`, `"login"` o `"fecha_login"`.
-  - **`Fecha de Baja (Reporte)`:** Columna con `"fecha de ba"` o `"baja"` (excluyendo motivos o tipos).
-  - **`Created Date`:** Columna con `"created"` o `"creac"`.
+1. [Descripción general](#1-descripción-general)
+2. [Requisitos e instalación](#2-requisitos-e-instalación)
+3. [Uso](#3-uso)
+4. [Archivos de entrada](#4-archivos-de-entrada)
+5. [Proceso de auditoría](#5-proceso-de-auditoría)
+6. [Matriz de riesgo](#6-matriz-de-riesgo)
+7. [Salida](#7-salida)
+8. [Pruebas](#8-pruebas)
+9. [Estructura del repositorio](#9-estructura-del-repositorio)
 
 ---
 
-## 🔄 Algoritmo Cronológico de Deduplicación y Selección Inteligente
+## 1. Descripción general
 
-Para resolver empates y múltiples registros de una misma identidad (`_key_compuesta = Username + "___" + Nombre Normalizado`):
+El sistema procesa de forma vectorizada dos orígenes de datos:
 
-### 1. Deduplicación en Universo (`deduplicate_universo`)
-Al agrupar registros por colaborador:
-* **Paso 1 (Detección de Reingreso Activo):**
-  - Si la persona tiene registros donde `Fecha_Baja` es nula/vacía **Y** registros con `Fecha_Baja` confirmada, se identifica como **Reingreso Activo**.
-  - Se clasifica con `ESTATUS_AUDITORIA = 'OK'` y `CATEGORIA_RIESGO = 'POSIBLE REINGRESO'`.
-  - Se preservan sus registros para auditoría, garantizando que sus accesos laborales vigentes no sean penalizados por bajas de relaciones laborales anteriores.
-* **Paso 2 (Múltiples Bajas Históricas):**
-  - Si todos los registros de la persona tienen fecha de baja confirmada:
-    1. Se ordenan cronológicamente por `_parsed_baja` descendente (`ascending=False`).
-    2. Se conserva únicamente el registro con la **fecha de baja más reciente (máxima)**.
-    3. Se descartan las fechas de baja antiguas (eliminando falsos positivos por bajas superadas).
+| Origen | Descripción |
+| :--- | :--- |
+| Archivo Universo | Padrón maestro de empleados y bajas. Debe contener la pestaña `BajasU`. |
+| Reporte de Logins | Exportación (`report<timestamp>.*`) de un IdP o sistema de identidades (Salesforce, CRM, Active Directory, Okta, etc.) en `.xlsx`, `.xls`, tabla HTML con extensión `.xls`, o `.csv`. |
 
-### 2. Selección Cronológica de Login en Reporte (`select_closest_login_event`)
-Determinada la `Fecha_Baja_Efectiva` del colaborador:
-* Si el usuario registra múltiples eventos de login en el reporte:
-  - Se calcula la distancia temporal absoluta en días:
-    $$\text{distancia} = |\text{Fecha\_Login} - \text{Fecha\_Baja\_Efectiva}|$$
-  - Se selecciona el registro de login que posea la **menor distancia temporal (el más cercano)** respecto a su fecha de baja.
-  - **Criterio Estricto de Desempate (Tie-Breaker):** En caso de empate exacto de distancia (ej. un login 2 días antes y otro 2 días después de la baja), se prioriza el **login posterior** (`login_date > fecha_baja`) para garantizar que ningún acceso no autorizado post-cese sea omitido.
-  - **Preservación de Estado de Cuenta:** Si la cuenta figura activa (`Active == 1`) en cualquiera de los registros del usuario en el reporte, se conserva el estado activo (`_parsed_active.max()`).
+Sobre ambos aplica:
 
----
+- Deduplicación cronológica del Universo y del reporte.
+- Validación compuesta (correo + nombre) para evitar falsos positivos por cuentas compartidas o reasignadas.
+- Matriz de riesgo con cinco categorías.
 
-## 🛡️ Validación Compuesta y Protección Anticolisiones
+El resultado es el libro `Auditoria_Accesos_Resultado.xlsx` con cinco pestañas.
 
-Para evitar falsos positivos causados por cuentas compartidas, cuentas genéricas o buzones reasignados:
-1. **Llave Compuesta de Cruce:** `_key_compuesta = _clean_email + "___" + _clean_nombre`.
-2. **Normalización Fonética y Ortográfica Profunda:**
-   - Eliminación de acentos, tildes y diacríticos (`unicodedata.normalize('NFKD')`).
-   - Supresión de caracteres especiales, puntuación y unificación a minúsculas.
-   - Colapso de dobles o triples espacios en blanco.
-3. **Detección de Discrepancia de Identidad (`DISCREPANCIA_IDENTIDAD = True`):**
-   - Si un correo existe en el reporte de logins pero está asignado a un nombre distinto al del padrón de bajas, el sistema **no vincula arbitrariamente el login** al empleado cesado.
-   - Marca la alerta `DISCREPANCIA_IDENTIDAD = True` para revisión del equipo de TI / IAM y evita falsos incidentes post-baja.
+## 2. Requisitos e instalación
 
----
+- Python 3.10 o superior.
+- Dependencias (`requirements.txt`): `pandas`, `numpy`, `openpyxl`, `xlrd` (lectura de `.xls`) y `pytest`.
 
-## 🧠 Matriz de Evaluación de Riesgos Tripartita
-
-La auditoría clasifica cada caso evaluado bajo la siguiente matriz operativa:
-
-| Acceso Post-Baja | Estado Cuenta (`Active`) | Estatus Auditoría | Categoría de Riesgo | Acción Operativa Requerida |
-| :---: | :---: | :--- | :--- | :--- |
-| **SÍ** (`Login > Baja`) | `1` (Activa) | `REVISAR` | **CRÍTICO - RIESGO ACTIVO** | 🚨 **Bloqueo Inmediato:** Desactivar cuenta en Directorio Activo / IdP e iniciar investigación forense. |
-| **NO** (`Login <= Baja` / Sin login) | `1` (Activa) | `REVISAR` | **ALTO - CUENTA HUÉRFANA** | ⚠️ **Desactivación Preventiva:** Cuenta aún encendida post-baja; mitigar riesgo de intrusión latente. |
-| **SÍ** (`Login > Baja`) | `0` (Inactiva) | `INCIDENTE RESUELTO` | **MEDIO - INCIDENTE PASADO** | 📋 **Documentación:** El usuario accedió tras su cese, pero la cuenta ya fue apagada. Evidencia histórica. |
-| **NO** (`Login <= Baja` / Sin login) | `0` (Inactiva) | `OK` | **CONFORME** | ✅ **Cumplimiento:** Control de acceso aplicado correctamente conforme a política. |
-| *N/A* | *Cualquiera* | `OK` | **POSIBLE REINGRESO** | ℹ️ **Informativo:** Colaborador activo vigente con antecedente de baja previa. Sin riesgo. |
-
-*Nota de Corte Calendario:* La comparación temporal se realiza normalizada a nivel día (`YYYY-MM-DD`), descartando horas para no penalizar accesos legítimos ocurridos durante la jornada laboral del día de cese.
-
----
-
-## 📊 Entregables y Salidas (Estructura del Libro Excel Final)
-
-El archivo generado (`Auditoria_Accesos_Resultado.xlsx`) cuenta con **5 pestañas corporativas** formateadas con estilos ejecutivos en OpenPyXL:
-
-1. **Pestaña 1 (`Glosario_y_Criterios` - index=0):**
-   - **Referencia ejecutiva y metodológica al abrir el archivo:**
-     - **Estructura del Libro:** Alcance y propósito de cada una de las hojas.
-     - **Diccionario de Estatus:** Matriz de severidad con condiciones lógicas, impacto y acciones.
-     - **Reglas Técnicas:** Justificación del corte calendario, priorización de bajas más recientes y validación compuesta.
-2. **Pestaña 2 (`Auditoria_Completa`):**
-   - Padrón íntegro con el 100% de los colaboradores evaluados y todas las columnas originales intactas, más las 7 columnas de auditoría:
-     `[ULTIMO_LOGIN_DETECTADO, ESTATUS_CUENTA_REPORTE, DISCREPANCIA_IDENTIDAD, ESTATUS_AUDITORIA, CATEGORIA_RIESGO, TIPO_HALLAZGO, DIAS_POST_BAJA]`.
-3. **Pestaña 3 (`Riesgos_Activos`):**
-   - Casos con cuenta encendida (`Active == 1`) que **requieren intervención inmediata de TI**:
-     - `CRÍTICO - RIESGO ACTIVO` (relleno rojo suave `#FEE2E2` / texto `#991B1B`).
-     - `ALTO - CUENTA HUÉRFANA` (relleno ámbar suave `#FEF3C7` / texto `#92400E`).
-4. **Pestaña 4 (`Incidentes_Pasados`):**
-   - Casos clasificados como `MEDIO - INCIDENTE PASADO` (`Active == 0` con login posterior). Formato gris neutro Slate (`#F1F5F9` / `#334155`), ordenados por último login descendente.
-5. **Pestaña 5 (`Reingresos`):**
-   - Registros clasificados como `POSIBLE REINGRESO` para transparencia de auditoría interna y conciliación con Recursos Humanos.
-
----
-
-## 📈 Resultados Actuales de Auditoría (Datos Reales de Producción)
-
-Al procesar los archivos de producción (`Universo_Usuarios_PROD_2.xlsx` y `report1790717536569.xlsx`):
-
-| Métrica Ejecutiva | Cantidad | Descripción Operativa |
-| :--- | :---: | :--- |
-| **Registros Originales Universo** | 4,980 | Padrón histórico original en pestaña `BajasU`. |
-| **Bajas Antiguas Depuradas** | 25 | Descarte de bajas de años anteriores de 25 personas con re-baja reciente. |
-| **Colaboradores Evaluados** | **4,955** | Universo limpio deduplicado cronológicamente. |
-| **Pestaña `Riesgos_Activos` (Acción Urgente)** | **4** | **2 Críticos** (Login + Cuenta Activa) + **2 Altos** (Cuentas Huérfanas). |
-| **Pestaña `Incidentes_Pasados` (Remediados)** | **15** | Acceso post-baja con cuenta ya apagada (optimizado tras deduplicación). |
-| **Pestaña `Reingresos` y Conformes** | **4,936** | Casos debidamente gestionados (`OK`). |
-| **Discrepancias de Identidad** | **18** | Cuentas compartidas / reasignadas protegidas contra falsos positivos. |
-
----
-
-## 🚀 Modos de Ejecución
-
-### Opción 1: Ejecución Automática (Recomendada)
-Coloca los archivos en la carpeta y ejecuta:
 ```bash
-python AUDIT.py --auto
+pip install -r requirements.txt
 ```
-o ejecuta interactivamente con detección automática de orígenes:
+
+## 3. Uso
+
+### Ejecución con detección automática
+
+Coloque los archivos en la carpeta del proyecto y ejecute:
+
 ```bash
 python AUDIT.py
 ```
-*(En Windows también puedes hacer doble clic en `AUDIT.bat`)*.
 
-### Opción 2: Especificando Rutas por Argumentos CLI
+En Windows también puede ejecutarse `AUDIT.bat`, que reenvía los argumentos a `AUDIT.py`.
+
+Si no se indican rutas, el programa intenta descubrir los archivos en la carpeta actual (`.xlsx`, `.xls`, `.csv`), ignorando temporales de Office (`~$*`) y archivos cuyo nombre contenga `resultado`:
+
+- **Reporte:** primer archivo cuyo nombre empiece por `report` y contenga dígitos; en su defecto, uno que contenga `report` o `login`.
+- **Universo:** archivo cuyo nombre contenga `prod`, `universo`, `padron`, `baja`, `empleado` o `master`, con prioridad para `prod` y descartando nombres con `ejemplo` o `sample`.
+- Si solo hay dos archivos válidos y uno se identificó, el otro se asume como el restante.
+
+Si tras la detección falta alguna ruta, el programa la solicita por consola.
+
+### Ejecución con rutas explícitas
+
 ```bash
-python AUDIT.py --universo "Universo_Usuarios_PROD_2.xlsx" --hoja-universo "BajasU" --reporte "report1790717536569.xlsx" --salida "Auditoria_Accesos_Resultado.xlsx"
+python AUDIT.py \
+  --universo "Universo_Usuarios_PROD_2.xlsx" \
+  --hoja-universo "BajasU" \
+  --reporte "report1790717536569.xlsx" \
+  --salida "Auditoria_Accesos_Resultado.xlsx"
 ```
 
-### Argumentos CLI Disponibles:
-- `-u`, `--universo`: Ruta al archivo Universo.
-- `--hoja-universo`: Nombre de la pestaña a leer en el Universo (por defecto: `BajasU`).
-- `-r`, `--reporte`: Ruta al reporte de logins (`.xlsx`, `.xls` o `.csv`).
-- `-o`, `--salida`: Ruta para el archivo Excel de resultados (por defecto: `Auditoria_Accesos_Resultado.xlsx`).
-- `--auto`: Ejecuta con auto-detección y sin confirmaciones interactivas.
+### Argumentos de línea de comandos
 
----
+| Argumento | Descripción | Valor por defecto |
+| :--- | :--- | :--- |
+| `-u`, `--universo` | Ruta al archivo Universo. | Detección automática |
+| `--hoja-universo` | Pestaña a leer en el Universo. | `BajasU` |
+| `-r`, `--reporte` | Ruta al reporte de logins (`.xlsx`, `.xls`, `.csv`). | Detección automática |
+| `-o`, `--salida` | Ruta del Excel de resultados. | `Auditoria_Accesos_Resultado.xlsx` |
+| `--auto` | Intenta descubrir los archivos en la carpeta actual. | Desactivado |
 
-## 🧪 Pruebas Automatizadas
+Notas de comportamiento:
 
-La solución cuenta con una suite completa de pruebas unitarias y de integración que validan el cruce, la deduplicación, los casos de borde y los archivos reales del proyecto:
+- La detección automática se ejecuta siempre que falte `--universo` o `--reporte`; `--auto` no altera ese flujo.
+- Si el archivo de salida está abierto en otra aplicación, se guarda con un sufijo de fecha y hora (`<nombre>_YYYYMMDD_HHMMSS.xlsx`).
+- El proceso retorna código `1` ante errores de entrada o de ejecución y `0` en caso de éxito.
+- Al finalizar se imprime en consola un resumen con las métricas de la ejecución.
+
+## 4. Archivos de entrada
+
+### 4.1 Archivo Universo
+
+| Elemento | Detalle |
+| :--- | :--- |
+| Pestaña | `BajasU`: coincidencia exacta (sin distinguir mayúsculas) o, en su defecto, por subcadena. Si no existe, se aborta con un error que lista las pestañas halladas. |
+| Columnas mínimas | 10. Las filas completamente vacías se descartan. |
+| Nombre (Col. C, índice 2) | Se busca por nombre (`nombre`, `nombre_completo`, `empleado`, `trabajador`, `full name`, `name`) y, si no aparece, por posición. |
+| `FECHA_BAJA` (Col. D, índice 3) | Se busca por nombre (`fecha_baja`, `fecha baja`, `fechabaja`, `fec_baja`, `baja`) y, si no aparece, por posición. |
+| Correo (Col. J, índice 9) | Se busca por nombre (`Unnamed: 9`, `(No column name)`, `correo`, `email`, `mail`, `correo_corporativo`, `username`) y, si no aparece, por posición. |
+
+Formatos de fecha admitidos: `DD/MM/YYYY` con o sin hora (día primero), ISO `YYYY-MM-DD` y valores de fecha nativos de Excel. Los valores `0`, vacíos y `nan` se tratan como "sin fecha".
+
+### 4.2 Reporte de Logins
+
+**Lectura del archivo**
+
+1. Si los primeros bytes contienen etiquetas HTML, se interpreta como tabla HTML (parser propio, sin dependencias externas; prueba codificaciones UTF-8, ISO-8859-1 y Windows-1252).
+2. Si la extensión es `.csv`, se lee como CSV.
+3. En otro caso se lee como libro Excel, eligiendo la pestaña en este orden: `in`; la única pestaña del libro; una que contenga `report`, `login`, `hoja1` o `sheet1`; la primera disponible. Si la lectura falla, se reintenta como HTML.
+
+**Preprocesamiento defensivo**
+
+- `dropna(how='all', axis=1)` para eliminar columnas fantasma generadas por celdas combinadas o exportaciones web.
+- Eliminación de filas vacías y recorte de espacios en los encabezados.
+- Se requieren al menos dos columnas tras la limpieza.
+
+**Mapeo de columnas**
+
+La búsqueda no distingue mayúsculas: primero coincidencia exacta, luego subcadena y, como último recurso, posición.
+
+| Campo lógico | Candidatos (en orden) | Posición por defecto |
+| :--- | :--- | :---: |
+| `name` (nombre completo) | `full name`, `full_name`, `nombre`, `nombre_completo`, `name`, `empleado` | 0 |
+| `user` (llave de cruce) | `username`, `usuario`, `correo`, `email`, `login`, `user name` | 2 |
+| `active` | `active`, `activo`, `estatus`, `status` | 3 |
+| `login` (último acceso) | `last login`, `ultimo login`, `last_login`, `ultimo_login`, `login date`, `fecha_login`, `login` | 4 |
+| `baja_rep` (baja en reporte) | `fecha de ba`, `fecha baja`, `fecha_baja`, `fechabaja`, `baja` (excluye columnas con `tipo` o `motivo`) | 5 |
+| `created` | `created date`, `created`, `creacion`, `creac`, `fecha creacion` | 6 |
+
+El indicador `Active` se normaliza a `1` o `0`: se consideran activos los valores `1`, `1.0`, `true`, `t`, `si`, `yes`, `y`, `activo` y `active`; cualquier otro valor equivale a `0`.
+
+## 5. Proceso de auditoría
+
+### 5.1 Normalización y llave compuesta
+
+- Correo: recorte de espacios y minúsculas. Los valores `""`, `nan`, `none`, `null`, `nat`, `0` y `0.0` se tratan como ausentes.
+- Nombre: minúsculas, eliminación de acentos y diacríticos (`NFKD` a ASCII) y colapso de espacios repetidos.
+- Llave de cruce: `_key_compuesta = correo + "___" + nombre normalizado`.
+- Si el reporte no contiene nombres utilizables, el cruce se realiza solo por correo.
+- Todas las comparaciones de fecha se hacen a nivel de día calendario (se descarta la hora), para no penalizar accesos legítimos del día del cese.
+
+### 5.2 Deduplicación del Universo (`deduplicate_universo`)
+
+Los registros se agrupan por llave compuesta:
+
+| Situación del grupo | Tratamiento |
+| :--- | :--- |
+| Un solo registro | Se conserva. |
+| Registros con y sin `FECHA_BAJA` | Se identifica como reingreso: se conservan todos los registros y la llave queda marcada para clasificarse como `POSIBLE REINGRESO`. |
+| Todos con `FECHA_BAJA` | Se ordenan por fecha descendente y se conserva solo el de baja más reciente. |
+| Registros sin correo | Se conservan sin agrupar. |
+
+### 5.3 Consolidación del reporte (`consolidate_logins`)
+
+Por cada llave compuesta del reporte se obtiene un único registro:
+
+- **Active:** se conserva el valor máximo; si la cuenta figura activa en cualquier registro, se considera activa.
+- **Baja en reporte:** se conserva la fecha más reciente, usada como respaldo cuando el Universo no tiene fecha.
+- **Login:** se guardan todos los logins válidos y se elige el más cercano a la fecha de baja del colaborador (ver siguiente punto).
+
+### 5.4 Selección del login (`select_closest_login_event`)
+
+Con la fecha de baja efectiva, se elige el login con menor `|fecha_login - fecha_baja|`.
+
+- En empate exacto de distancia se prioriza el login posterior a la baja.
+- Si no hay fecha de baja, se toma el login más reciente.
+- Si no hay logins válidos, el resultado es vacío.
+
+La fecha de baja efectiva es la del Universo; si falta, se usa la del reporte.
+
+### 5.5 Validación de identidad
+
+- Si la llave compuesta del Universo coincide con la del reporte, el colaborador queda enlazado a su login y estado de cuenta.
+- Si el correo existe en el reporte pero asociado a un nombre distinto, no se enlaza el login y se marca `DISCREPANCIA_IDENTIDAD = True` para revisión de TI/IAM.
+- Los colaboradores sin coincidencia se muestran como `Sin registro` en `ULTIMO_LOGIN_DETECTADO` y `ESTATUS_CUENTA_REPORTE`.
+
+### 5.6 Detección de reingresos
+
+Un registro se clasifica como reingreso si, para la misma identidad, existe al menos un registro con baja y otro sin baja. La comparación se evalúa por cualquiera de estos criterios:
+
+- Correo.
+- Nombre normalizado.
+- Clave de trabajador (columna `cla_trab`, `id_empleado`, `num_emp` o `empleado_id`, si existe).
+- Llave compuesta marcada durante la deduplicación del Universo.
+
+Los reingresos no se penalizan por bajas de relaciones laborales anteriores.
+
+## 6. Matriz de riesgo
+
+Aplica a registros que no son reingreso. "Acceso post-baja" significa `fecha_login > fecha_baja`.
+
+| Acceso post-baja | Cuenta (`Active`) | `ESTATUS_AUDITORIA` | `CATEGORIA_RIESGO` | Acción requerida |
+| :---: | :---: | :--- | :--- | :--- |
+| Sí | Activa | `REVISAR` | `CRÍTICO - RIESGO ACTIVO` | Bloqueo inmediato de la cuenta e inicio de investigación. |
+| No o sin login | Activa | `REVISAR` | `ALTO - CUENTA HUÉRFANA` | Desactivación preventiva de la cuenta. |
+| Sí | Inactiva | `INCIDENTE RESUELTO` | `MEDIO - INCIDENTE PASADO` | Documentar como evidencia histórica. |
+| No o sin login | Inactiva | `OK` | `CONFORME` | Ninguna; control aplicado correctamente. |
+| No aplica | Cualquiera | `OK` | `POSIBLE REINGRESO` | Informativa; conciliar con Recursos Humanos. |
+
+Notas:
+
+- Los registros sin fecha de baja válida se clasifican como `CONFORME`.
+- Los colaboradores `Sin registro` en el reporte se consideran con cuenta inactiva.
+- `DIAS_POST_BAJA` solo se calcula cuando existe acceso post-baja.
+
+## 7. Salida
+
+El archivo `Auditoria_Accesos_Resultado.xlsx` contiene cinco pestañas:
+
+| # | Pestaña | Contenido |
+| :---: | :--- | :--- |
+| 1 | `Glosario_y_Criterios` | Estructura del libro, diccionario de estatus con condiciones, impacto y acciones, y reglas técnicas (corte calendario, baja más reciente, validación compuesta). |
+| 2 | `Auditoria_Completa` | Padrón deduplicado con todas las columnas originales más las columnas de auditoría. |
+| 3 | `Riesgos_Activos` | Casos `CRÍTICO - RIESGO ACTIVO` y `ALTO - CUENTA HUÉRFANA`, ordenados por severidad y luego por días post-baja descendente. |
+| 4 | `Incidentes_Pasados` | Casos `MEDIO - INCIDENTE PASADO`, ordenados por último login descendente. |
+| 5 | `Reingresos` | Casos `POSIBLE REINGRESO`. |
+
+### Columnas de auditoría añadidas
+
+| Columna | Descripción |
+| :--- | :--- |
+| `ULTIMO_LOGIN_DETECTADO` | Fecha del login seleccionado (`DD/MM/YYYY`), vacío si no hay login válido o `Sin registro`. |
+| `ESTATUS_CUENTA_REPORTE` | `Activa`, `Inactiva` o `Sin registro`. |
+| `DISCREPANCIA_IDENTIDAD` | `True` si el correo existe en el reporte con otro nombre. |
+| `ESTATUS_AUDITORIA` | `REVISAR`, `INCIDENTE RESUELTO` u `OK`. |
+| `CATEGORIA_RIESGO` | Categoría de la matriz de riesgo. |
+| `TIPO_HALLAZGO` | Mismo valor que `CATEGORIA_RIESGO` (se mantiene por compatibilidad). |
+| `DIAS_POST_BAJA` | Días entre la baja y el login, solo con acceso post-baja. |
+
+`FECHA_BAJA` se reescribe en formato `DD/MM/YYYY` cuando existe una fecha válida.
+
+### Formato visual
+
+Encabezados oscuros (`#1F2937`), primera fila inmovilizada, ancho de columnas ajustado y resaltado semántico:
+
+| Color | Relleno / Texto | Aplica a |
+| :--- | :--- | :--- |
+| Rojo | `#FEE2E2` / `#991B1B` | `CRÍTICO - RIESGO ACTIVO` |
+| Ámbar | `#FEF3C7` / `#92400E` | `ALTO - CUENTA HUÉRFANA`, discrepancias de identidad |
+| Gris Slate | `#F1F5F9` / `#334155` | `MEDIO - INCIDENTE PASADO`, `INCIDENTE RESUELTO` |
+| Azul | `#E0F2FE` / `#0369A1` | `POSIBLE REINGRESO` |
+| Verde | `#DCFCE7` / `#166534` | `CONFORME`, `OK` |
+
+## 8. Pruebas
 
 ```bash
 pytest -v
 ```
 
-### Cobertura de Pruebas (16/16 Aprobadas):
-1. `test_caso_1_mismo_correo_nombres_distintos`: Validación de discrepancia de identidad.
-2. `test_caso_2_acentos_y_espacios_match_perfecto`: Normalización fonética y caso de incidente resuelto.
-3. `test_caso_3_cuenta_activa_post_baja`: Detección de cuenta huérfana (`Active == 1`).
-4. `test_criterios_validacion_matriz_riesgo`: Validación de los 5 estados de la matriz.
-5. `test_caso_4_real_workspace_files`: Validación con archivos reales de producción y conteo de filas de salida.
-6. `test_caso_5_glosario_y_criterios_completo`: Verificación de secciones, estilos y diccionario en hoja 0.
-7. `test_fechas_de_baja_multiples`: Priorización de baja más reciente ante múltiples bajas históricas.
-8. `test_login_mas_cercano`: Selección del login más cercano respecto a la fecha de baja efectiva.
-9. `test_login_empate_distancia_prioriza_posterior`: Desempate favoreciendo el login posterior ante equidistancia.
-10. `test_robust_parse_dates`: Parseo defensivo de formatos de fecha DD/MM/YYYY, ISO y valores vacíos/nulos.
-11. `test_parse_active_series`: Parseo robusto de estados de cuenta booleanos y textuales.
-12. `test_ghost_columns_and_truncated_headers`: Manejo de columnas fantasma y cabeceras truncadas.
-13. `test_multiple_logins_consolidation`: Consolidación y selección de login en reporte.
-14. `test_double_risk_audit_matrix`: Integración de la matriz de riesgo.
-15. `test_real_workspace_files`: Validación complementaria sobre archivos del repositorio.
-16. `test_glosario_y_criterios_unitario`: Creación aislada de pestaña de glosario y metodología.
+La suite contiene 16 pruebas en `tests/test_auditoria.py` y `tests/test_auditor.py`. Dos de ellas validan los archivos reales de producción y se omiten (`skipped`) si esos archivos no están presentes en el entorno, por lo que en un clon limpio el resultado esperado es 14 aprobadas y 2 omitidas.
 
+| Archivo | Cobertura |
+| :--- | :--- |
+| `tests/test_auditoria.py` | Discrepancia de identidad con mismo correo y nombres distintos; normalización de acentos y espacios; cuenta activa post-baja; criterios de la matriz de riesgo; archivos reales del espacio de trabajo; contenido del glosario; múltiples fechas de baja; login más cercano; desempate hacia el login posterior. |
+| `tests/test_auditor.py` | Parseo de fechas (`DD/MM/YYYY`, ISO, vacíos); parseo de `Active`; columnas fantasma y cabeceras truncadas; consolidación de múltiples logins; matriz de riesgo integrada; archivos reales del repositorio; creación aislada del glosario. |
+
+## 9. Estructura del repositorio
+
+| Ruta | Descripción |
+| :--- | :--- |
+| `AUDIT.py` | Punto de entrada; delega en `auditor_bajas.main()`. |
+| `AUDIT.bat` | Lanzador para Windows. |
+| `auditor_bajas.py` | Motor completo: lectura, normalización, deduplicación, cruce, matriz de riesgo, exportación y CLI. |
+| `requirements.txt` | Dependencias. |
+| `tests/` | Suite de pruebas automatizadas. |
