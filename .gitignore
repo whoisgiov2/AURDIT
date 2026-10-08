@@ -1,0 +1,24 @@
+# =============================================================================
+# .gitignore - Reglas de exclusión para EXCAUDIT
+# =============================================================================
+
+# Archivos temporales del agente (Política de archivos temporales)
+.agent-tmp/
+agent_test_*
+
+# Entornos virtuales de Python
+entornopys/
+venv/
+.venv/
+env/
+
+# Cachés y salidas secundarias de compilación y pruebas
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.log
+
+# Archivos generados temporalmente por suites de pruebas
+Auditoria_Accesos_Test_*.xlsx
+Auditoria_Accesos_Resultado_Test.xlsx

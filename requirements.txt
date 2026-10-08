@@ -1,0 +1,21 @@
+# =============================================================================
+# Requisitos y dependencias para Auditoría de Accesos Post-Baja
+# Compatibilidad validada: Python 3.10+ / 3.11+
+# =============================================================================
+
+# Procesamiento vectorial y manipulación de datos estructurados
+pandas>=2.0.0
+
+# Operaciones numéricas y soporte de arreglos
+numpy>=1.24.0
+
+# Lectura, creación y estilizado ejecutivo de libros Excel (.xlsx) con OpenPyXL
+openpyxl>=3.1.0
+
+# Soporte para lectura de libros de cálculo antiguos Excel (.xls / BIFF8)
+xlrd>=2.0.1
+
+# =============================================================================
+# Pruebas automatizadas (requerido para ejecutar pytest y suite en tests/)
+# =============================================================================
+pytest>=7.4.0
