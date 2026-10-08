@@ -44,47 +44,51 @@ pip install -r requirements.txt
 
 ## 3. Uso
 
-### Ejecución con detección automática
-
-Coloque los archivos en la carpeta del proyecto y ejecute:
+### Ejecución interactiva
 
 ```bash
 python AUDIT.py
 ```
 
-En Windows también puede ejecutarse `AUDIT.bat`, que reenvía los argumentos a `AUDIT.py`.
+En Windows también puede ejecutarse `AUDIT.bat`, que reenvía los argumentos a `AUDIT.py`. El programa solicita, en orden:
 
-Si no se indican rutas, el programa intenta descubrir los archivos en la carpeta actual (`.xlsx`, `.xls`, `.csv`), ignorando temporales de Office (`~$*`) y archivos cuyo nombre contenga `resultado`:
+1. **Ruta del archivo Universo.** Se ofrece como valor por defecto (Enter para aceptarlo) el archivo detectado automáticamente en la carpeta actual o, si no hay, la última ruta usada.
+2. **Ruta del reporte de logins**, salvo que se haya detectado automáticamente (`report<dígitos>` en la carpeta actual) o se indique con `--reporte`.
+3. **Carpeta de resultados:**
+   - **Primera vez:** pide la ruta y, si la carpeta no existe, pregunta antes de crearla. La carpeta debe estar fuera de la carpeta de scripts; de lo contrario se rechaza.
+   - **Ejecuciones siguientes:** pregunta si los resultados se guardan en la última carpeta usada. Si se responde que no, pide una nueva ruta (con las mismas validaciones) y la recuerda.
 
-- **Reporte:** primer archivo cuyo nombre empiece por `report` y contenga dígitos; en su defecto, uno que contenga `report` o `login`.
-- **Universo:** archivo cuyo nombre contenga `prod`, `universo`, `padron`, `baja`, `empleado` o `master`, con prioridad para `prod` y descartando nombres con `ejemplo` o `sample`.
-- Si solo hay dos archivos válidos y uno se identificó, el otro se asume como el restante.
+El archivo de resultados se guarda como `Auditoria_Accesos_Resultado.xlsx` dentro de la carpeta elegida.
 
-Si tras la detección falta alguna ruta, el programa la solicita por consola.
+### Configuración guardada
 
-### Ejecución con rutas explícitas
+La última carpeta de resultados y la última ruta del Universo se guardan en `~/.auditoria_accesos/config.json` (fuera del repositorio). Puede cambiarse la ubicación con la variable de entorno `AUDITORIA_CONFIG`.
+
+### Ejecución no interactiva
 
 ```bash
 python AUDIT.py \
   --universo "Universo_Usuarios_PROD_2.xlsx" \
-  --hoja-universo "BajasU" \
   --reporte "report1790717536569.xlsx" \
-  --salida "Auditoria_Accesos_Resultado.xlsx"
+  --carpeta-resultados "D:/Auditorias/2026-10"
 ```
+
+Con `--carpeta-resultados` no se hacen preguntas de carpeta (se crea si no existe) y la ruta queda guardada para la próxima vez. Con `--salida` se indica la ruta completa del Excel y no se consulta ni se guarda la carpeta. Sin consola interactiva y con datos faltantes, el programa termina con error.
 
 ### Argumentos de línea de comandos
 
 | Argumento | Descripción | Valor por defecto |
 | :--- | :--- | :--- |
-| `-u`, `--universo` | Ruta al archivo Universo. | Detección automática |
+| `-u`, `--universo` | Ruta al archivo Universo. | Se pregunta |
 | `--hoja-universo` | Pestaña a leer en el Universo. | `BajasU` |
-| `-r`, `--reporte` | Ruta al reporte de logins (`.xlsx`, `.xls`, `.csv`). | Detección automática |
-| `-o`, `--salida` | Ruta del Excel de resultados. | `Auditoria_Accesos_Resultado.xlsx` |
-| `--auto` | Intenta descubrir los archivos en la carpeta actual. | Desactivado |
+| `-r`, `--reporte` | Ruta al reporte de logins (`.xlsx`, `.xls`, `.csv`). | Detección automática o se pregunta |
+| `--carpeta-resultados` | Carpeta de resultados (fuera de la carpeta de scripts). | Se pregunta |
+| `-o`, `--salida` | Ruta completa del Excel de resultados. | Ninguno |
+| `--auto` | Sin efecto funcional; se conserva por compatibilidad. | Desactivado |
 
 Notas de comportamiento:
 
-- La detección automática se ejecuta siempre que falte `--universo` o `--reporte`; `--auto` no altera ese flujo.
+- La detección automática considera archivos `.xlsx`, `.xls` y `.csv` de la carpeta actual, ignorando temporales de Office (`~$*`) y nombres que contengan `resultado`. El reporte es el que empiece por `report` con dígitos (o contenga `report`/`login`); el Universo, el que contenga `prod`, `universo`, `padron`, `baja`, `empleado` o `master`.
 - Si el archivo de salida está abierto en otra aplicación, se guarda con un sufijo de fecha y hora (`<nombre>_YYYYMMDD_HHMMSS.xlsx`).
 - El proceso retorna código `1` ante errores de entrada o de ejecución y `0` en caso de éxito.
 - Al finalizar se imprime en consola un resumen con las métricas de la ejecución.
@@ -250,12 +254,12 @@ Encabezados oscuros (`#1F2937`), primera fila inmovilizada, ancho de columnas aj
 pytest -v
 ```
 
-La suite contiene 16 pruebas en `tests/test_auditoria.py` y `tests/test_auditor.py`. Dos de ellas validan los archivos reales de producción y se omiten (`skipped`) si esos archivos no están presentes en el entorno, por lo que en un clon limpio el resultado esperado es 14 aprobadas y 2 omitidas.
+La suite contiene 17 pruebas en `tests/test_auditoria.py` y `tests/test_auditor.py`. Dos de ellas validan los archivos reales de producción y se omiten (`skipped`) si esos archivos no están presentes en el entorno, por lo que en un clon limpio el resultado esperado es 15 aprobadas y 2 omitidas.
 
 | Archivo | Cobertura |
 | :--- | :--- |
 | `tests/test_auditoria.py` | Discrepancia de identidad con mismo correo y nombres distintos; normalización de acentos y espacios; cuenta activa post-baja; criterios de la matriz de riesgo; archivos reales del espacio de trabajo; contenido del glosario; múltiples fechas de baja; login más cercano; desempate hacia el login posterior. |
-| `tests/test_auditor.py` | Parseo de fechas (`DD/MM/YYYY`, ISO, vacíos); parseo de `Active`; columnas fantasma y cabeceras truncadas; consolidación de múltiples logins; matriz de riesgo integrada; archivos reales del repositorio; creación aislada del glosario. |
+| `tests/test_auditor.py` | Configuración persistente y selección de carpeta de resultados; parseo de fechas (`DD/MM/YYYY`, ISO, vacíos); parseo de `Active`; columnas fantasma y cabeceras truncadas; consolidación de múltiples logins; matriz de riesgo integrada; archivos reales del repositorio; creación aislada del glosario. |
 
 ## 9. Estructura del repositorio
 

@@ -369,3 +369,27 @@ def test_glosario_y_criterios_unitario():
     assert ws["B15"].value == "REVISAR"
     assert ws["A15"].fill.start_color.rgb == "FFFEF3C7"
 
+
+
+def test_config_y_carpeta_resultados(tmp_path, monkeypatch):
+    import auditor_bajas as ab
+
+    monkeypatch.setenv("AUDITORIA_CONFIG", str(tmp_path / "cfg" / "config.json"))
+    assert ab.load_config() == {}
+    ab.save_config({"output_dir": "X"})
+    assert ab.load_config() == {"output_dir": "X"}
+
+    # Primera vez: ruta dentro de scripts rechazada, luego una valida que se crea tras confirmar
+    destino = tmp_path / "resultados"
+    respuestas = iter([str(ab.SCRIPT_DIR / "res"), str(destino), "s"])
+    monkeypatch.setattr(ab, "_ask", lambda prompt: next(respuestas))
+    assert ab.resolve_output_dir({}) == destino
+    assert destino.is_dir()
+
+    # Siguientes veces: confirmar la ultima ruta o cambiarla
+    monkeypatch.setattr(ab, "_ask", lambda prompt: "s")
+    assert ab.resolve_output_dir({"output_dir": str(destino)}) == destino
+    nuevo = tmp_path / "otra"
+    respuestas = iter(["n", str(nuevo), "s"])
+    monkeypatch.setattr(ab, "_ask", lambda prompt: next(respuestas))
+    assert ab.resolve_output_dir({"output_dir": str(destino)}) == nuevo
