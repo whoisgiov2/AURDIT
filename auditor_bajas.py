@@ -62,6 +62,7 @@ import json
 from html.parser import HTMLParser
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -1196,6 +1197,64 @@ def _write_cell(
 
 
 RESUMEN_SHEET = "Resumen_Auditoria"
+COMPLETA_SHEET = "Auditoria_Completa"
+
+# Columnas calculadas que permanecen visibles al abrir 'Auditoria_Completa'
+_COLUMNAS_VISIBLES_CALCULADAS = {
+    "ULTIMO_LOGIN_DETECTADO",
+    "DIAS_POST_BAJA",
+    "ESTATUS_AUDITORIA",
+    "CATEGORIA_RIESGO",
+}
+
+
+def _es_columna_relevante(header: Any) -> bool:
+    """
+    Indica si una columna de 'Auditoria_Completa' debe verse al abrir el libro:
+    nombre, clave (cla_*), ubicación, fecha de baja y las columnas calculadas de
+    _COLUMNAS_VISIBLES_CALCULADAS. Los nombres del Universo varían, por lo que se
+    compara el encabezado normalizado (sin acentos, minúsculas).
+    """
+    texto = normalize_text_name(header).replace("_", " ")
+    if str(header).strip().upper() in _COLUMNAS_VISIBLES_CALCULADAS:
+        return True
+    if re.match(r"^nombre\b", texto) or texto in {"empleado", "trabajador", "full name", "name"}:
+        return True
+    if re.match(r"^cla(ve)?\b", texto):
+        return True
+    if "ubicaci" in texto:
+        return True
+    return texto == "baja" or ("baja" in texto and ("fecha" in texto or "fec " in texto))
+
+
+def hide_secondary_columns(ws: openpyxl.worksheet.worksheet.Worksheet) -> list[str]:
+    """
+    Oculta las columnas no relevantes de la hoja agrupándolas (nivel de esquema 1)
+    y colapsadas: el libro abre mostrando solo lo esencial y cualquier botón '+'
+    sobre los encabezados (o el botón '2' de esquema) las vuelve a desplegar.
+    Si ninguna columna resulta relevante no se oculta nada. Devuelve las letras ocultas.
+    """
+    headers = [cell.value for cell in ws[1]]
+    relevantes = [_es_columna_relevante(h) for h in headers]
+    if not any(relevantes):
+        return []
+
+    ocultas: list[str] = []
+    n = len(relevantes)
+    for idx, relevante in enumerate(relevantes, start=1):
+        if relevante:
+            continue
+        letra = get_column_letter(idx)
+        dim = ws.column_dimensions[letra]
+        dim.hidden = True
+        dim.outlineLevel = 1
+        ocultas.append(letra)
+        # La columna siguiente al grupo (visible o una más allá del final) lo marca colapsado ('+')
+        if idx == n or relevantes[idx]:
+            ws.column_dimensions[get_column_letter(idx + 1)].collapsed = True
+
+    ws.column_dimensions.max_outline = 1  # openpyxl lo vuelca a sheetFormatPr.outlineLevelCol al guardar
+    return ocultas
 
 # (categoría, estatus, criterio breve, relleno, texto)
 _RESUMEN_CATEGORIAS = [
@@ -1406,6 +1465,8 @@ def apply_professional_excel_styling(workbook: openpyxl.Workbook) -> None:
       * POSIBLE REINGRESO: Azul suave / Cian (#E0F2FE / #0369A1)
       * CONFORME / OK: Verde suave (#DCFCE7 / #166534)
     - Líneas de cuadrícula activas y formato estándar de fechas
+    - 'Auditoria_Completa' abre con las columnas secundarias ocultas y agrupadas
+      (ver `hide_secondary_columns`); se despliegan con el botón de esquema de Excel.
     """
     header_fill = PatternFill(start_color="FF1F2937", end_color="FF1F2937", fill_type="solid")
     header_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFFFF")
@@ -1575,6 +1636,10 @@ def apply_professional_excel_styling(workbook: openpyxl.Workbook) -> None:
                     line_len = max(len(l) for l in lines)
                     max_len = max(max_len, line_len)
             ws.column_dimensions[col_letter].width = max(max_len + 4, 13)
+
+        # 5. 'Auditoria_Completa' abre con las columnas secundarias ocultas (desplegables)
+        if sheetname == COMPLETA_SHEET:
+            hide_secondary_columns(ws)
 
 
 def export_to_excel(
