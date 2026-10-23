@@ -482,6 +482,25 @@ def test_caso_5_resumen_auditoria_cuantitativo():
     assert fills["CONFORME"] == "FFDCFCE7"
 
 
+def test_resumen_incluye_graficos_de_categorias():
+    """El resumen agrega una dona de porcentajes y barras de cantidad ligadas a la tabla."""
+    from openpyxl.chart import BarChart, DoughnutChart
+
+    wb = openpyxl.Workbook()
+    ws = create_resumen_sheet(wb, _df_resumen())
+    tipos = sorted(type(c).__name__ for c in ws._charts)
+    assert tipos == ["BarChart", "DoughnutChart"]
+
+    fila_critico = next(r for r in range(1, ws.max_row + 1) if ws.cell(row=r, column=1).value == "CRÍTICO - RIESGO ACTIVO")
+    for chart in ws._charts:
+        assert len(chart.series[0].dPt) == 5
+        assert f"$B${fila_critico}" in chart.series[0].val.numRef.f
+        assert f"$A${fila_critico}" in chart.series[0].cat.numRef.f
+
+    wb2 = openpyxl.Workbook()
+    assert create_resumen_sheet(wb2, _df_resumen().iloc[0:0])._charts == []
+
+
 def test_resumen_sin_metrics_y_sin_registros():
     """Sin métricas de ejecución o con DataFrame vacío no falla."""
     wb = openpyxl.Workbook()

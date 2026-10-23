@@ -69,6 +69,9 @@ import unicodedata
 
 import numpy as np
 import openpyxl
+from openpyxl.chart import BarChart, DoughnutChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.series import DataPoint
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pandas as pd
@@ -1203,6 +1206,71 @@ _RESUMEN_CATEGORIAS = [
     ("CONFORME", "OK", "Sin login > baja y cuenta inactiva", "FFDCFCE7", "FF166534"),
 ]
 
+# Color sólido de cada categoría en los gráficos (mismo orden que _RESUMEN_CATEGORIAS)
+_RESUMEN_COLORES_GRAFICO = ["DC2626", "F59E0B", "64748B", "0EA5E9", "22C55E"]
+
+
+def _add_resumen_charts(
+    ws: openpyxl.worksheet.worksheet.Worksheet,
+    first_row: int,
+    last_row: int,
+    anchor_col: str = "F",
+) -> None:
+    """
+    Agrega a la hoja de resumen dos gráficos nativos de Excel (se actualizan si cambian
+    los datos de la tabla): una dona con el % por categoría y barras con la cantidad.
+    `first_row`/`last_row` delimitan las filas de categorías (columna A = nombre,
+    B = cantidad) sin incluir el encabezado ni el TOTAL.
+    """
+    labels = Reference(ws, min_col=1, min_row=first_row, max_row=last_row)
+    counts = Reference(ws, min_col=2, min_row=first_row - 1, max_row=last_row)
+
+    def colorear(series: Any) -> None:
+        for idx, color in enumerate(_RESUMEN_COLORES_GRAFICO):
+            pt = DataPoint(idx=idx)
+            pt.graphicalProperties.solidFill = color
+            pt.graphicalProperties.line.solidFill = "FFFFFF"
+            series.dPt.append(pt)
+
+    dona = DoughnutChart()
+    dona.title = "Distribución por categoría de riesgo (%)"
+    dona.add_data(counts, titles_from_data=True)
+    dona.set_categories(labels)
+    dona.holeSize = 55
+    dona.legend.position = "r"
+    dona.dataLabels = DataLabelList()
+    dona.dataLabels.showPercent = True
+    dona.dataLabels.showVal = False
+    dona.dataLabels.showCatName = False
+    dona.dataLabels.showSerName = False
+    dona.dataLabels.showLegendKey = False
+    dona.dataLabels.showLeaderLines = False
+    colorear(dona.series[0])
+    dona.width, dona.height = 17, 9
+    ws.add_chart(dona, f"{anchor_col}3")
+
+    barras = BarChart()
+    barras.type = "bar"
+    barras.title = "Cantidad de colaboradores por categoría"
+    barras.add_data(counts, titles_from_data=True)
+    barras.set_categories(labels)
+    barras.legend = None
+    barras.y_axis.majorGridlines = None
+    barras.y_axis.delete = False
+    barras.x_axis.delete = False
+    barras.x_axis.scaling.orientation = "maxMin"  # misma jerarquía que la tabla (arriba = más crítico)
+    barras.y_axis.crosses = "max"  # con el eje invertido, deja la escala abajo
+    barras.y_axis.numFmt = "0"
+    barras.gapWidth = 60
+    barras.dataLabels = DataLabelList()
+    barras.dataLabels.showVal = True
+    barras.dataLabels.showSerName = False
+    barras.dataLabels.showCatName = False
+    barras.dataLabels.showLegendKey = False
+    colorear(barras.series[0])
+    barras.width, barras.height = 17, 9
+    ws.add_chart(barras, f"{anchor_col}22")
+
 
 def create_resumen_sheet(
     workbook: openpyxl.Workbook,
@@ -1214,7 +1282,8 @@ def create_resumen_sheet(
     cuantitativos de la auditoría ejecutada:
     1. Datos de la ejecución (fecha y archivos de entrada).
     2. Volumen procesado (registros del Universo, deduplicación y reporte).
-    3. Resultados por categoría de riesgo (cantidad y porcentaje).
+    3. Resultados por categoría de riesgo (cantidad y porcentaje), con una dona de
+       porcentajes y un gráfico de barras de cantidades junto a la tabla.
     4. Indicadores adicionales (discrepancias, sin registro, días post-baja).
     Las filas que dependen de `metrics` solo se escriben si se proporcionó.
     """
@@ -1273,6 +1342,7 @@ def create_resumen_sheet(
     # 2. Resultados por categoría
     section("Resultados por categoría", ["Categoría", "Cantidad", "% del total", "Criterio"])
     counts = df_completo["CATEGORIA_RIESGO"].value_counts() if total else pd.Series(dtype=int)
+    cat_first_row = row
     for categoria, estatus, criterio, bg, fg in _RESUMEN_CATEGORIAS:
         n = int(counts.get(categoria, 0))
         pct = (n / total) if total else 0
@@ -1287,6 +1357,7 @@ def create_resumen_sheet(
         c.font, c.border, c.alignment = body_font, border, center
         _write_cell(ws, row, 4, criterio, body_font, None, border, left)
         row += 1
+    cat_last_row = row - 1
     _write_cell(ws, row, 1, "TOTAL", bold_font, None, border, left)
     _write_cell(ws, row, 2, total, bold_font, None, border, center)
     c = ws.cell(row=row, column=3, value=1 if total else 0)
@@ -1315,6 +1386,9 @@ def create_resumen_sheet(
     ws.column_dimensions["B"].width = 22
     ws.column_dimensions["C"].width = 14
     ws.column_dimensions["D"].width = 36
+    ws.column_dimensions["E"].width = 3
+    if total:
+        _add_resumen_charts(ws, cat_first_row, cat_last_row)
     return ws
 
 
