@@ -216,8 +216,8 @@ El archivo `Auditoria_Accesos_Resultado_AAAA-MM-DD.xlsx` contiene cinco pestaña
 
 | # | Pestaña | Contenido |
 | :---: | :--- | :--- |
-| 1 | `Resumen_Auditoria` | Datos cuantitativos de la ejecución: fecha, archivos de entrada, volumen procesado, cantidad y porcentaje por categoría de riesgo, e indicadores adicionales (casos a revisar, discrepancias de identidad, sin registro, días post-baja máximo y promedio). |
-| 2 | `Auditoria_Completa` | Padrón deduplicado con todas las columnas originales más las columnas de auditoría. |
+| 1 | `Resumen_Auditoria` | Datos cuantitativos de la ejecución: fecha, archivos de entrada, volumen procesado, cantidad y porcentaje por categoría de riesgo, gráficos nativos de Excel junto a la tabla (dona con el porcentaje por categoría y barras con la cantidad), e indicadores adicionales (casos a revisar, discrepancias de identidad, sin registro, días post-baja máximo y promedio). |
+| 2 | `Auditoria_Completa` | Padrón deduplicado con todas las columnas originales más las columnas de auditoría. Al abrir el libro solo se ven nombre, clave (`cla_*`), ubicación, fecha de baja, `ULTIMO_LOGIN_DETECTADO`, `DIAS_POST_BAJA`, `ESTATUS_AUDITORIA` y `CATEGORIA_RIESGO`; el resto de columnas están agrupadas y ocultas, y se despliegan con los botones `+` (o el nivel `2`) sobre los encabezados de Excel. Las columnas relevantes se identifican por el nombre del encabezado. |
 | 3 | `Riesgos_Activos` | Casos `CRÍTICO - RIESGO ACTIVO` y `ALTO - CUENTA HUÉRFANA`, ordenados por severidad y luego por días post-baja descendente. |
 | 4 | `Incidentes_Pasados` | Casos `MEDIO - INCIDENTE PASADO`, ordenados por último login descendente. |
 | 5 | `Reingresos` | Casos `POSIBLE REINGRESO`. |

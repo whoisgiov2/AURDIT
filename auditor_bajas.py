@@ -62,6 +62,7 @@ import json
 from html.parser import HTMLParser
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -69,6 +70,9 @@ import unicodedata
 
 import numpy as np
 import openpyxl
+from openpyxl.chart import BarChart, DoughnutChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.series import DataPoint
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pandas as pd
@@ -1193,6 +1197,64 @@ def _write_cell(
 
 
 RESUMEN_SHEET = "Resumen_Auditoria"
+COMPLETA_SHEET = "Auditoria_Completa"
+
+# Columnas calculadas que permanecen visibles al abrir 'Auditoria_Completa'
+_COLUMNAS_VISIBLES_CALCULADAS = {
+    "ULTIMO_LOGIN_DETECTADO",
+    "DIAS_POST_BAJA",
+    "ESTATUS_AUDITORIA",
+    "CATEGORIA_RIESGO",
+}
+
+
+def _es_columna_relevante(header: Any) -> bool:
+    """
+    Indica si una columna de 'Auditoria_Completa' debe verse al abrir el libro:
+    nombre, clave (cla_*), ubicación, fecha de baja y las columnas calculadas de
+    _COLUMNAS_VISIBLES_CALCULADAS. Los nombres del Universo varían, por lo que se
+    compara el encabezado normalizado (sin acentos, minúsculas).
+    """
+    texto = normalize_text_name(header).replace("_", " ")
+    if str(header).strip().upper() in _COLUMNAS_VISIBLES_CALCULADAS:
+        return True
+    if re.match(r"^nombre\b", texto) or texto in {"empleado", "trabajador", "full name", "name"}:
+        return True
+    if re.match(r"^cla(ve)?\b", texto):
+        return True
+    if "ubicaci" in texto:
+        return True
+    return texto == "baja" or ("baja" in texto and ("fecha" in texto or "fec " in texto))
+
+
+def hide_secondary_columns(ws: openpyxl.worksheet.worksheet.Worksheet) -> list[str]:
+    """
+    Oculta las columnas no relevantes de la hoja agrupándolas (nivel de esquema 1)
+    y colapsadas: el libro abre mostrando solo lo esencial y cualquier botón '+'
+    sobre los encabezados (o el botón '2' de esquema) las vuelve a desplegar.
+    Si ninguna columna resulta relevante no se oculta nada. Devuelve las letras ocultas.
+    """
+    headers = [cell.value for cell in ws[1]]
+    relevantes = [_es_columna_relevante(h) for h in headers]
+    if not any(relevantes):
+        return []
+
+    ocultas: list[str] = []
+    n = len(relevantes)
+    for idx, relevante in enumerate(relevantes, start=1):
+        if relevante:
+            continue
+        letra = get_column_letter(idx)
+        dim = ws.column_dimensions[letra]
+        dim.hidden = True
+        dim.outlineLevel = 1
+        ocultas.append(letra)
+        # La columna siguiente al grupo (visible o una más allá del final) lo marca colapsado ('+')
+        if idx == n or relevantes[idx]:
+            ws.column_dimensions[get_column_letter(idx + 1)].collapsed = True
+
+    ws.column_dimensions.max_outline = 1  # openpyxl lo vuelca a sheetFormatPr.outlineLevelCol al guardar
+    return ocultas
 
 # (categoría, estatus, criterio breve, relleno, texto)
 _RESUMEN_CATEGORIAS = [
@@ -1202,6 +1264,71 @@ _RESUMEN_CATEGORIAS = [
     ("POSIBLE REINGRESO", "OK", "Registros con y sin baja", "FFE0F2FE", "FF0369A1"),
     ("CONFORME", "OK", "Sin login > baja y cuenta inactiva", "FFDCFCE7", "FF166534"),
 ]
+
+# Color sólido de cada categoría en los gráficos (mismo orden que _RESUMEN_CATEGORIAS)
+_RESUMEN_COLORES_GRAFICO = ["DC2626", "F59E0B", "64748B", "0EA5E9", "22C55E"]
+
+
+def _add_resumen_charts(
+    ws: openpyxl.worksheet.worksheet.Worksheet,
+    first_row: int,
+    last_row: int,
+    anchor_col: str = "F",
+) -> None:
+    """
+    Agrega a la hoja de resumen dos gráficos nativos de Excel (se actualizan si cambian
+    los datos de la tabla): una dona con el % por categoría y barras con la cantidad.
+    `first_row`/`last_row` delimitan las filas de categorías (columna A = nombre,
+    B = cantidad) sin incluir el encabezado ni el TOTAL.
+    """
+    labels = Reference(ws, min_col=1, min_row=first_row, max_row=last_row)
+    counts = Reference(ws, min_col=2, min_row=first_row - 1, max_row=last_row)
+
+    def colorear(series: Any) -> None:
+        for idx, color in enumerate(_RESUMEN_COLORES_GRAFICO):
+            pt = DataPoint(idx=idx)
+            pt.graphicalProperties.solidFill = color
+            pt.graphicalProperties.line.solidFill = "FFFFFF"
+            series.dPt.append(pt)
+
+    dona = DoughnutChart()
+    dona.title = "Distribución por categoría de riesgo (%)"
+    dona.add_data(counts, titles_from_data=True)
+    dona.set_categories(labels)
+    dona.holeSize = 55
+    dona.legend.position = "r"
+    dona.dataLabels = DataLabelList()
+    dona.dataLabels.showPercent = True
+    dona.dataLabels.showVal = False
+    dona.dataLabels.showCatName = False
+    dona.dataLabels.showSerName = False
+    dona.dataLabels.showLegendKey = False
+    dona.dataLabels.showLeaderLines = False
+    colorear(dona.series[0])
+    dona.width, dona.height = 17, 9
+    ws.add_chart(dona, f"{anchor_col}3")
+
+    barras = BarChart()
+    barras.type = "bar"
+    barras.title = "Cantidad de colaboradores por categoría"
+    barras.add_data(counts, titles_from_data=True)
+    barras.set_categories(labels)
+    barras.legend = None
+    barras.y_axis.majorGridlines = None
+    barras.y_axis.delete = False
+    barras.x_axis.delete = False
+    barras.x_axis.scaling.orientation = "maxMin"  # misma jerarquía que la tabla (arriba = más crítico)
+    barras.y_axis.crosses = "max"  # con el eje invertido, deja la escala abajo
+    barras.y_axis.numFmt = "0"
+    barras.gapWidth = 60
+    barras.dataLabels = DataLabelList()
+    barras.dataLabels.showVal = True
+    barras.dataLabels.showSerName = False
+    barras.dataLabels.showCatName = False
+    barras.dataLabels.showLegendKey = False
+    colorear(barras.series[0])
+    barras.width, barras.height = 17, 9
+    ws.add_chart(barras, f"{anchor_col}22")
 
 
 def create_resumen_sheet(
@@ -1214,7 +1341,8 @@ def create_resumen_sheet(
     cuantitativos de la auditoría ejecutada:
     1. Datos de la ejecución (fecha y archivos de entrada).
     2. Volumen procesado (registros del Universo, deduplicación y reporte).
-    3. Resultados por categoría de riesgo (cantidad y porcentaje).
+    3. Resultados por categoría de riesgo (cantidad y porcentaje), con una dona de
+       porcentajes y un gráfico de barras de cantidades junto a la tabla.
     4. Indicadores adicionales (discrepancias, sin registro, días post-baja).
     Las filas que dependen de `metrics` solo se escriben si se proporcionó.
     """
@@ -1273,6 +1401,7 @@ def create_resumen_sheet(
     # 2. Resultados por categoría
     section("Resultados por categoría", ["Categoría", "Cantidad", "% del total", "Criterio"])
     counts = df_completo["CATEGORIA_RIESGO"].value_counts() if total else pd.Series(dtype=int)
+    cat_first_row = row
     for categoria, estatus, criterio, bg, fg in _RESUMEN_CATEGORIAS:
         n = int(counts.get(categoria, 0))
         pct = (n / total) if total else 0
@@ -1287,6 +1416,7 @@ def create_resumen_sheet(
         c.font, c.border, c.alignment = body_font, border, center
         _write_cell(ws, row, 4, criterio, body_font, None, border, left)
         row += 1
+    cat_last_row = row - 1
     _write_cell(ws, row, 1, "TOTAL", bold_font, None, border, left)
     _write_cell(ws, row, 2, total, bold_font, None, border, center)
     c = ws.cell(row=row, column=3, value=1 if total else 0)
@@ -1315,6 +1445,9 @@ def create_resumen_sheet(
     ws.column_dimensions["B"].width = 22
     ws.column_dimensions["C"].width = 14
     ws.column_dimensions["D"].width = 36
+    ws.column_dimensions["E"].width = 3
+    if total:
+        _add_resumen_charts(ws, cat_first_row, cat_last_row)
     return ws
 
 
@@ -1332,6 +1465,8 @@ def apply_professional_excel_styling(workbook: openpyxl.Workbook) -> None:
       * POSIBLE REINGRESO: Azul suave / Cian (#E0F2FE / #0369A1)
       * CONFORME / OK: Verde suave (#DCFCE7 / #166534)
     - Líneas de cuadrícula activas y formato estándar de fechas
+    - 'Auditoria_Completa' abre con las columnas secundarias ocultas y agrupadas
+      (ver `hide_secondary_columns`); se despliegan con el botón de esquema de Excel.
     """
     header_fill = PatternFill(start_color="FF1F2937", end_color="FF1F2937", fill_type="solid")
     header_font = Font(name="Segoe UI", size=10, bold=True, color="FFFFFFFF")
@@ -1501,6 +1636,10 @@ def apply_professional_excel_styling(workbook: openpyxl.Workbook) -> None:
                     line_len = max(len(l) for l in lines)
                     max_len = max(max_len, line_len)
             ws.column_dimensions[col_letter].width = max(max_len + 4, 13)
+
+        # 5. 'Auditoria_Completa' abre con las columnas secundarias ocultas (desplegables)
+        if sheetname == COMPLETA_SHEET:
+            hide_secondary_columns(ws)
 
 
 def export_to_excel(

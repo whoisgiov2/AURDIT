@@ -482,6 +482,25 @@ def test_caso_5_resumen_auditoria_cuantitativo():
     assert fills["CONFORME"] == "FFDCFCE7"
 
 
+def test_resumen_incluye_graficos_de_categorias():
+    """El resumen agrega una dona de porcentajes y barras de cantidad ligadas a la tabla."""
+    from openpyxl.chart import BarChart, DoughnutChart
+
+    wb = openpyxl.Workbook()
+    ws = create_resumen_sheet(wb, _df_resumen())
+    tipos = sorted(type(c).__name__ for c in ws._charts)
+    assert tipos == ["BarChart", "DoughnutChart"]
+
+    fila_critico = next(r for r in range(1, ws.max_row + 1) if ws.cell(row=r, column=1).value == "CRÍTICO - RIESGO ACTIVO")
+    for chart in ws._charts:
+        assert len(chart.series[0].dPt) == 5
+        assert f"$B${fila_critico}" in chart.series[0].val.numRef.f
+        assert f"$A${fila_critico}" in chart.series[0].cat.numRef.f
+
+    wb2 = openpyxl.Workbook()
+    assert create_resumen_sheet(wb2, _df_resumen().iloc[0:0])._charts == []
+
+
 def test_resumen_sin_metrics_y_sin_registros():
     """Sin métricas de ejecución o con DataFrame vacío no falla."""
     wb = openpyxl.Workbook()
@@ -643,3 +662,46 @@ def test_login_empate_distancia_prioriza_posterior():
     assert user["ULTIMO_LOGIN_DETECTADO"] == "03/09/2026"
     assert user["DIAS_POST_BAJA"] == 2
     assert user["ESTATUS_AUDITORIA"] == "INCIDENTE RESUELTO"
+
+
+def test_auditoria_completa_oculta_columnas_secundarias(tmp_path):
+    """'Auditoria_Completa' abre solo con las columnas relevantes; el resto queda agrupado y oculto."""
+    from openpyxl.utils import get_column_letter
+
+    df = pd.DataFrame({
+        "CLA_TRAB": [101, 102],
+        "NOMBRE": ["ANA LOPEZ", "LUIS DIAZ"],
+        "Ubicación": ["CDMX", "MTY"],
+        "FECHA_BAJA": ["10/08/2026", "11/08/2026"],
+        "PUESTO": ["Analista", "Gerente"],
+        "CORREO": ["ana@x.com", "luis@x.com"],
+        "ULTIMO_LOGIN_DETECTADO": ["12/08/2026", "Sin registro"],
+        "ESTATUS_CUENTA_REPORTE": ["Activa", "Sin registro"],
+        "DISCREPANCIA_IDENTIDAD": [False, False],
+        "ESTATUS_AUDITORIA": ["REVISAR", "OK"],
+        "CATEGORIA_RIESGO": ["CRÍTICO - RIESGO ACTIVO", "CONFORME"],
+        "TIPO_HALLAZGO": ["CRÍTICO - RIESGO ACTIVO", "CONFORME"],
+        "DIAS_POST_BAJA": [2, None],
+    })
+    out = export_to_excel(df, df.iloc[[0]], tmp_path / "res.xlsx")
+    wb = openpyxl.load_workbook(out)
+
+    ws = wb["Auditoria_Completa"]
+    estado = {
+        ws.cell(row=1, column=c).value: ws.column_dimensions[get_column_letter(c)].hidden
+        for c in range(1, ws.max_column + 1)
+    }
+    visibles = {k for k, oculta in estado.items() if not oculta}
+    assert visibles == {
+        "CLA_TRAB", "NOMBRE", "Ubicación", "FECHA_BAJA", "ULTIMO_LOGIN_DETECTADO",
+        "ESTATUS_AUDITORIA", "CATEGORIA_RIESGO", "DIAS_POST_BAJA",
+    }
+    assert estado["PUESTO"] and estado["CORREO"] and estado["TIPO_HALLAZGO"]
+    assert ws.column_dimensions["E"].outlineLevel == 1  # agrupada: desplegable con '+'
+    assert ws.sheet_format.outlineLevelCol == 1  # Excel muestra los botones de esquema
+
+    # Los datos siguen completos y las demás hojas no se ocultan
+    assert ws.max_column == len(df.columns)
+    for nombre in ("Riesgos_Activos", "Incidentes_Pasados", "Reingresos", "Resumen_Auditoria"):
+        w = wb[nombre]
+        assert not any(d.hidden for d in w.column_dimensions.values())
