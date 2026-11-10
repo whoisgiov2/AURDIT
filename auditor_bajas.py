@@ -38,10 +38,11 @@ MATRIZ DE EVALUACIÓN DE RIESGOS Y SEGMENTACIÓN TRIPARTITA:
 2. INCIDENTES RESUELTOS / PASADOS (Evidencia histórica para auditoría, no riesgo vivo):
    - 'MEDIO - INCIDENTE PASADO': Acceso confirmado posterior a la baja (Fecha_Last_Login > Fecha_Baja),
      pero la cuenta ya fue deshabilitada (Active == 0). ESTATUS_AUDITORIA = 'INCIDENTE RESUELTO'.
-3. REINGRESOS Y CASOS OK (Sin riesgo de seguridad):
-   - 'POSIBLE REINGRESO': Usuario activo vigente sin fecha de baja en segundo registro. ESTATUS_AUDITORIA = 'OK'.
-   - 'CONFORME': Control de baja aplicado correctamente (Active == 0 sin acceso post-baja) o colaborador activo vigente.
-     ESTATUS_AUDITORIA = 'OK'.
+    # 3. REINGRESOS Y CASOS OK (Sin riesgo de seguridad):
+    - 'POSIBLE REINGRESO': Usuario activo vigente sin fecha de baja en segundo registro. ESTATUS_AUDITORIA = 'OK'.
+    - 'CONFORME': Control de baja aplicado correctamente (Active == 0 sin acceso post-baja), colaborador activo vigente
+      o movimiento de tipo reajuste en NOM_TIPO_MOV (la cuenta puede permanecer activa sin riesgo).
+      ESTATUS_AUDITORIA = 'OK'.
 
 ESTRUCTURA DE EXPORTACIÓN EN EXCEL (OPENPYXL):
 - Pestaña 1: 'Resumen_Auditoria' (datos cuantitativos de la ejecución: volumen, resultados por categoría e indicadores).
@@ -281,6 +282,34 @@ def find_column_by_name_or_index(
         f"Se buscaron nombres con patrones {candidates} o la columna en posición {default_index}. "
         f"Columnas disponibles: {list(df.columns)}"
     )
+
+
+def find_tipo_mov_column(df: pd.DataFrame) -> Optional[str]:
+    """Busca de manera resiliente la columna de tipo de movimiento (ej. NOM_TIPO_MOV)."""
+    return find_column_by_substring(
+        df,
+        candidates=["nom_tipo_mov", "tipo_mov", "tipo mov", "tipo de movimiento"],
+        default_index=None,
+        column_role="NOM_TIPO_MOV (Tipo de movimiento)",
+    )
+
+
+def detect_reajuste_series(
+    df: pd.DataFrame,
+    tipo_mov_col: Optional[str] = None,
+) -> pd.Series:
+    """
+    Identifica los registros donde la columna NOM_TIPO_MOV indica que el movimiento
+    fue un 'reajuste' (insensible a mayúsculas, acentos o espacios extra).
+    Si la columna no existe en el DataFrame, devuelve una serie booleana en False.
+    """
+    if tipo_mov_col is None or tipo_mov_col not in df.columns:
+        tipo_mov_col = find_tipo_mov_column(df)
+    if not tipo_mov_col or tipo_mov_col not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+
+    normalized_mov = clean_name_series(df[tipo_mov_col])
+    return normalized_mov.str.contains("reajuste", na=False)
 
 
 # ============================================================================
@@ -675,10 +704,12 @@ def deduplicate_universo(
         clean_name = pd.Series("", index=df_work.index)
 
     parsed_baja = robust_parse_dates(df_work[baja_col])
+    is_reajuste = detect_reajuste_series(df_work)
 
     df_work["_clean_email"] = clean_email
     df_work["_clean_name"] = clean_name
     df_work["_parsed_baja"] = parsed_baja
+    df_work["_is_reajuste"] = is_reajuste
     df_work["_key_compuesta"] = np.where(
         clean_email.notna(),
         clean_email + "___" + clean_name,
@@ -702,8 +733,11 @@ def deduplicate_universo(
                     reingreso_keys.add(key)
                     indices_to_keep.extend(grp.index.tolist())
                 elif grp["_parsed_baja"].notna().all():
-                    # Paso 2: Múltiples bajas -> conservar únicamente la más reciente (máxima)
-                    sorted_grp = grp.sort_values(by="_parsed_baja", ascending=False)
+                    # Paso 2: Múltiples bajas -> conservar la más reciente (en empate de fecha, priorizar reajuste)
+                    sorted_grp = grp.sort_values(
+                        by=["_parsed_baja", "_is_reajuste"],
+                        ascending=[False, False],
+                    )
                     indices_to_keep.append(sorted_grp.index[0])
                 else:
                     indices_to_keep.append(grp.index[0])
@@ -984,15 +1018,29 @@ def execute_audit(
     )
 
     # -------------------------------------------------------------------------
+    # Detección de Reajustes en NOM_TIPO_MOV
+    # -------------------------------------------------------------------------
+    # Si la columna NOM_TIPO_MOV indica que la baja fue en realidad un reajuste,
+    # la cuenta no tiene inconveniente en continuar activa ni en registrar logins,
+    # por lo que se evalúa como CONFORME (ESTATUS_AUDITORIA = 'OK').
+    is_reajuste = detect_reajuste_series(merged)
+
+    # -------------------------------------------------------------------------
     # Reglas de Auditoría y Matriz de Riesgo Tripartita
     # -------------------------------------------------------------------------
-    acceso_post_baja = has_valid_baja & has_valid_login & (merged["_parsed_login_date"] > fecha_baja_final) & ~is_reingreso
+    acceso_post_baja = (
+        has_valid_baja
+        & has_valid_login
+        & (merged["_parsed_login_date"] > fecha_baja_final)
+        & ~is_reingreso
+        & ~is_reajuste
+    )
 
     cond_reingreso = is_reingreso
-    cond_critico = ~is_reingreso & has_valid_baja & acceso_post_baja & is_active_account
-    cond_alto = ~is_reingreso & has_valid_baja & ~acceso_post_baja & is_active_account
-    cond_medio = ~is_reingreso & has_valid_baja & acceso_post_baja & ~is_active_account
-    cond_conforme = ~is_reingreso & (~has_valid_baja | (~acceso_post_baja & ~is_active_account))
+    cond_critico = ~is_reingreso & ~is_reajuste & has_valid_baja & acceso_post_baja & is_active_account
+    cond_alto = ~is_reingreso & ~is_reajuste & has_valid_baja & ~acceso_post_baja & is_active_account
+    cond_medio = ~is_reingreso & ~is_reajuste & has_valid_baja & acceso_post_baja & ~is_active_account
+    cond_conforme = ~is_reingreso & (is_reajuste | ~has_valid_baja | (~acceso_post_baja & ~is_active_account))
 
     # ESTATUS_AUDITORIA: 'REVISAR', 'INCIDENTE RESUELTO', 'OK'
     estatus_conditions = [
@@ -1211,9 +1259,9 @@ _COLUMNAS_VISIBLES_CALCULADAS = {
 def _es_columna_relevante(header: Any) -> bool:
     """
     Indica si una columna de 'Auditoria_Completa' debe verse al abrir el libro:
-    nombre, clave (cla_*), ubicación, fecha de baja y las columnas calculadas de
-    _COLUMNAS_VISIBLES_CALCULADAS. Los nombres del Universo varían, por lo que se
-    compara el encabezado normalizado (sin acentos, minúsculas).
+    nombre, clave (cla_*), ubicación, fecha de baja, tipo de movimiento (NOM_TIPO_MOV)
+    y las columnas calculadas de _COLUMNAS_VISIBLES_CALCULADAS. Los nombres del Universo
+    varían, por lo que se compara el encabezado normalizado (sin acentos, minúsculas).
     """
     texto = normalize_text_name(header).replace("_", " ")
     if str(header).strip().upper() in _COLUMNAS_VISIBLES_CALCULADAS:
@@ -1223,6 +1271,8 @@ def _es_columna_relevante(header: Any) -> bool:
     if re.match(r"^cla(ve)?\b", texto):
         return True
     if "ubicaci" in texto:
+        return True
+    if "tipo mov" in texto or texto == "tipo de movimiento":
         return True
     return texto == "baja" or ("baja" in texto and ("fecha" in texto or "fec " in texto))
 

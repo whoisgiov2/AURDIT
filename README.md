@@ -181,7 +181,7 @@ La fecha de baja efectiva es la del Universo; si falta, se usa la del reporte.
 - Si el correo existe en el reporte pero asociado a un nombre distinto, no se enlaza el login y se marca `DISCREPANCIA_IDENTIDAD = True` para revisión de TI/IAM.
 - Los colaboradores sin coincidencia se muestran como `Sin registro` en `ULTIMO_LOGIN_DETECTADO` y `ESTATUS_CUENTA_REPORTE`.
 
-### 5.6 Detección de reingresos
+### 5.6 Detección de reingresos y movimientos por reajuste
 
 Un registro se clasifica como reingreso si, para la misma identidad, existe al menos un registro con baja y otro sin baja. La comparación se evalúa por cualquiera de estos criterios:
 
@@ -192,9 +192,11 @@ Un registro se clasifica como reingreso si, para la misma identidad, existe al m
 
 Los reingresos no se penalizan por bajas de relaciones laborales anteriores.
 
+Asimismo, si el Universo incluye la columna `NOM_TIPO_MOV` (o equivalente) y su valor contiene `"reajuste"` (sin distinguir mayúsculas ni acentos), el movimiento no corresponde a una baja definitiva, por lo que la cuenta puede seguir activa o registrar accesos sin considerarse riesgo y se clasifica como `CONFORME` (`ESTATUS_AUDITORIA = 'OK'`).
+
 ## 6. Matriz de riesgo
 
-Aplica a registros que no son reingreso. "Acceso post-baja" significa `fecha_login > fecha_baja`.
+Aplica a registros que no son reingreso ni movimiento por reajuste. "Acceso post-baja" significa `fecha_login > fecha_baja`.
 
 | Acceso post-baja | Cuenta (`Active`) | `ESTATUS_AUDITORIA` | `CATEGORIA_RIESGO` | Acción requerida |
 | :---: | :---: | :--- | :--- | :--- |
@@ -206,7 +208,7 @@ Aplica a registros que no son reingreso. "Acceso post-baja" significa `fecha_log
 
 Notas:
 
-- Los registros sin fecha de baja válida se clasifican como `CONFORME`.
+- Los registros sin fecha de baja válida o con `NOM_TIPO_MOV` de tipo `reajuste` se clasifican como `CONFORME` (`OK`).
 - Los colaboradores `Sin registro` en el reporte se consideran con cuenta inactiva.
 - `DIAS_POST_BAJA` solo se calcula cuando existe acceso post-baja.
 
@@ -217,7 +219,7 @@ El archivo `Auditoria_Accesos_Resultado_AAAA-MM-DD.xlsx` contiene cinco pestaña
 | # | Pestaña | Contenido |
 | :---: | :--- | :--- |
 | 1 | `Resumen_Auditoria` | Datos cuantitativos de la ejecución: fecha, archivos de entrada, volumen procesado, cantidad y porcentaje por categoría de riesgo, gráficos nativos de Excel junto a la tabla (dona con el porcentaje por categoría y barras con la cantidad), e indicadores adicionales (casos a revisar, discrepancias de identidad, sin registro, días post-baja máximo y promedio). |
-| 2 | `Auditoria_Completa` | Padrón deduplicado con todas las columnas originales más las columnas de auditoría. Al abrir el libro solo se ven nombre, clave (`cla_*`), ubicación, fecha de baja, `ULTIMO_LOGIN_DETECTADO`, `DIAS_POST_BAJA`, `ESTATUS_AUDITORIA` y `CATEGORIA_RIESGO`; el resto de columnas están agrupadas y ocultas, y se despliegan con los botones `+` (o el nivel `2`) sobre los encabezados de Excel. Las columnas relevantes se identifican por el nombre del encabezado. |
+| 2 | `Auditoria_Completa` | Padrón deduplicado con todas las columnas originales más las columnas de auditoría. Al abrir el libro solo se ven nombre, clave (`cla_*`), ubicación, fecha de baja, tipo de movimiento (`NOM_TIPO_MOV`), `ULTIMO_LOGIN_DETECTADO`, `DIAS_POST_BAJA`, `ESTATUS_AUDITORIA` y `CATEGORIA_RIESGO`; el resto de columnas están agrupadas y ocultas, y se despliegan con los botones `+` (o el nivel `2`) sobre los encabezados de Excel. Las columnas relevantes se identifican por el nombre del encabezado. |
 | 3 | `Riesgos_Activos` | Casos `CRÍTICO - RIESGO ACTIVO` y `ALTO - CUENTA HUÉRFANA`, ordenados por severidad y luego por días post-baja descendente. |
 | 4 | `Incidentes_Pasados` | Casos `MEDIO - INCIDENTE PASADO`, ordenados por último login descendente. |
 | 5 | `Reingresos` | Casos `POSIBLE REINGRESO`. |
