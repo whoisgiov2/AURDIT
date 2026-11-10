@@ -44,25 +44,28 @@ pip install -r requirements.txt
 
 ## 3. Uso
 
-### Ejecución interactiva
+### Ejecución interactiva (Menú en CMD)
 
 ```bash
 python AUDIT.py
 ```
 
-En Windows también puede ejecutarse `AUDIT.bat`, que reenvía los argumentos a `AUDIT.py`. El programa solicita, en orden:
+En Windows también puede ejecutarse `AUDIT.bat`, que reenvía los argumentos a `AUDIT.py`. Al iniciarse en consola interactiva, despliega un **menú principal** con el estado actual de los archivos registrados y cuatro opciones:
 
-1. **Ruta del archivo Universo.** Se ofrece como valor por defecto (Enter para aceptarlo) el archivo detectado automáticamente en la carpeta actual o, si no hay, la última ruta usada.
-2. **Ruta del reporte de logins**, salvo que se haya detectado automáticamente (`report<dígitos>` en la carpeta actual) o se indique con `--reporte`.
-3. **Carpeta de resultados:**
-   - **Primera vez:** pide la ruta y, si la carpeta no existe, pregunta antes de crearla. La carpeta debe estar fuera de la carpeta de scripts; de lo contrario se rechaza.
-   - **Ejecuciones siguientes:** pregunta si los resultados se guardan en la última carpeta usada. Si se responde que no, pide una nueva ruta (con las mismas validaciones) y la recuerda.
+1. **`[1] Ejecutar auditoría de accesos` (opción por defecto al presionar `Enter`):**
+   - **Selección de Universo:** Muestra una lista numerada con los archivos Universo ya registrados en configuración, las hojas `BajasU` extraídas previamente y los archivos detectados en la carpeta actual, para elegirlos con un solo número (`1`, `2`, ...) o `Enter`. También incluye la opción `[E]` para extraer en ese momento únicamente la hoja `BajasU` a un archivo ligero, o `[M]` para escribir/arrastrar otra ruta.
+   - **Selección de Reporte de Logins:** Muestra una lista numerada con los reportes detectados o usados recientemente, o permite arrastrar un nuevo archivo.
+   - **Carpeta de resultados:** Confirma la carpeta registrada (`[S/n]`) o solicita una nueva fuera de la carpeta de scripts.
+2. **`[2] Extraer solo la hoja 'BajasU' del Universo a un archivo único ligero`:**
+   - Toma el archivo Universo maestro (que suele contener múltiples pestañas pesadas) y genera un archivo `.xlsx` independiente (`<nombre>_BajasU.xlsx`) que contiene **únicamente** los datos limpios de la pestaña `BajasU`, dejándolo registrado como Universo predeterminado para agilizar futuras ejecuciones.
+3. **`[3] Cambiar carpeta de resultados registrada`.**
+4. **`[4] Salir`.**
 
 El archivo de resultados se guarda como `Auditoria_Accesos_Resultado_AAAA-MM-DD.xlsx` (fecha del día de la auditoría) dentro de la carpeta elegida. Si se ejecuta más de una vez el mismo día, el archivo se sobrescribe.
 
 ### Configuración guardada
 
-La última carpeta de resultados y la última ruta del Universo se guardan en `~/.auditoria_accesos/config.json` (fuera del repositorio). Puede cambiarse la ubicación con la variable de entorno `AUDITORIA_CONFIG`.
+La carpeta de resultados y el historial de archivos Universo y Reportes registrados se guardan en `~/.auditoria_accesos/config.json` (fuera del repositorio). Puede cambiarse la ubicación con la variable de entorno `AUDITORIA_CONFIG`.
 
 ### Ejecución no interactiva
 
@@ -73,16 +76,23 @@ python AUDIT.py \
   --carpeta-resultados "D:/Auditorias/2026-10"
 ```
 
+También puede extraerse directamente la hoja `BajasU` por línea de comandos:
+
+```bash
+python AUDIT.py --universo "Universo_Usuarios_PROD_2.xlsx" --extraer-hoja
+```
+
 Con `--carpeta-resultados` no se hacen preguntas de carpeta (se crea si no existe) y la ruta queda guardada para la próxima vez. Con `--salida` se indica la ruta completa del Excel y no se consulta ni se guarda la carpeta. Sin consola interactiva y con datos faltantes, el programa termina con error.
 
 ### Argumentos de línea de comandos
 
 | Argumento | Descripción | Valor por defecto |
 | :--- | :--- | :--- |
-| `-u`, `--universo` | Ruta al archivo Universo. | Se pregunta |
+| `-u`, `--universo` | Ruta al archivo Universo. | Se selecciona en menú |
 | `--hoja-universo` | Pestaña a leer en el Universo. | `BajasU` |
-| `-r`, `--reporte` | Ruta al reporte de logins (`.xlsx`, `.xls`, `.csv`). | Detección automática o se pregunta |
-| `--carpeta-resultados` | Carpeta de resultados (fuera de la carpeta de scripts). | Se pregunta |
+| `--extraer-hoja [RUTA]` | Extrae solo la pestaña del Universo a un archivo `.xlsx` único y ligero. | `<universo>_BajasU.xlsx` |
+| `-r`, `--reporte` | Ruta al reporte de logins (`.xlsx`, `.xls`, `.csv`). | Detección automática o menú |
+| `--carpeta-resultados` | Carpeta de resultados (fuera de la carpeta de scripts). | Se pregunta / recuerda |
 | `-o`, `--salida` | Ruta completa del Excel de resultados. | Ninguno |
 | `--auto` | Sin efecto funcional; se conserva por compatibilidad. | Desactivado |
 
