@@ -705,3 +705,176 @@ def test_auditoria_completa_oculta_columnas_secundarias(tmp_path):
     for nombre in ("Riesgos_Activos", "Incidentes_Pasados", "Reingresos", "Resumen_Auditoria"):
         w = wb[nombre]
         assert not any(d.hidden for d in w.column_dimensions.values())
+    wb.close()
+
+
+def test_nom_tipo_mov_reajuste_es_conforme_y_visible(tmp_path):
+    """
+    Si NOM_TIPO_MOV describe un 'reajuste' (sin importar mayúsculas o acentos),
+    la cuenta no debe clasificarse como riesgo activo ni incidente pasado aunque
+    siga activa (Active == 1) o tenga logins posteriores a FECHA_BAJA.
+    Además, NOM_TIPO_MOV debe mantenerse visible en 'Auditoria_Completa'.
+    """
+    from openpyxl.utils import get_column_letter
+
+    df_uni = pd.DataFrame({
+        "CLA_TRAB": [101, 102, 103, 104],
+        "NOMBRE": [
+            "USUARIO REAJUSTE ACTIVO LOGIN",
+            "USUARIO REAJUSTE ACTIVO SIN LOGIN",
+            "USUARIO REAJUSTE INACTIVO LOGIN",
+            "USUARIO BAJA REAL ACTIVA",
+        ],
+        "FECHA_BAJA": ["01/09/2026", "01/09/2026", "01/09/2026", "01/09/2026"],
+        "NOM_TIPO_MOV": [
+            "Baja por Reajuste",
+            "REAJUSTE DE SUELDO",
+            "  reajuste  ",
+            "Renuncia Voluntaria",
+        ],
+        "CORREO": [
+            "reajuste1@empresa.com",
+            "reajuste2@empresa.com",
+            "reajuste3@empresa.com",
+            "bajareal@empresa.com",
+        ],
+    })
+
+    df_rep = pd.DataFrame({
+        "Full Name": [
+            "USUARIO REAJUSTE ACTIVO LOGIN",
+            "USUARIO REAJUSTE ACTIVO SIN LOGIN",
+            "USUARIO REAJUSTE INACTIVO LOGIN",
+            "USUARIO BAJA REAL ACTIVA",
+        ],
+        "Username": [
+            "reajuste1@empresa.com",
+            "reajuste2@empresa.com",
+            "reajuste3@empresa.com",
+            "bajareal@empresa.com",
+        ],
+        "Active": ["1", "1", "0", "1"],
+        "Last Login": [
+            "15/09/2026 10:00",  # Posterior a fecha_baja + Active 1 -> por ser Reajuste es CONFORME
+            "20/08/2026 10:00",  # Previo a fecha_baja + Active 1 -> por ser Reajuste es CONFORME
+            "15/09/2026 10:00",  # Posterior a fecha_baja + Active 0 -> por ser Reajuste es CONFORME
+            "15/09/2026 10:00",  # Baja real -> CRÍTICO - RIESGO ACTIVO
+        ],
+    })
+
+    col_map = {
+        "name": "Full Name",
+        "user": "Username",
+        "active": "Active",
+        "login": "Last Login",
+        "baja_rep": None,
+    }
+
+    consolidated = consolidate_logins(df_rep, col_map)
+    df_completo, df_riesgos_activos, metrics = execute_audit(
+        df_universo=df_uni,
+        baja_col="FECHA_BAJA",
+        email_col="CORREO",
+        nombre_col="NOMBRE",
+        consolidated_logins=consolidated,
+    )
+
+    for nombre_reajuste in (
+        "USUARIO REAJUSTE ACTIVO LOGIN",
+        "USUARIO REAJUSTE ACTIVO SIN LOGIN",
+        "USUARIO REAJUSTE INACTIVO LOGIN",
+    ):
+        row = df_completo[df_completo["NOMBRE"] == nombre_reajuste].iloc[0]
+        assert row["ESTATUS_AUDITORIA"] == "OK"
+        assert row["CATEGORIA_RIESGO"] == "CONFORME"
+        assert pd.isna(row["DIAS_POST_BAJA"])
+
+    row_baja_real = df_completo[df_completo["NOMBRE"] == "USUARIO BAJA REAL ACTIVA"].iloc[0]
+    assert row_baja_real["ESTATUS_AUDITORIA"] == "REVISAR"
+    assert row_baja_real["CATEGORIA_RIESGO"] == "CRÍTICO - RIESGO ACTIVO"
+    assert row_baja_real["DIAS_POST_BAJA"] == 14
+
+    assert len(df_riesgos_activos) == 1
+    assert df_riesgos_activos.iloc[0]["NOMBRE"] == "USUARIO BAJA REAL ACTIVA"
+    assert metrics.total_critico_activo == 1
+    assert metrics.total_alto_huerfana == 0
+    assert metrics.total_medio_incidente_pasado == 0
+    assert metrics.total_conforme == 3
+
+    out = export_to_excel(df_completo, df_riesgos_activos, tmp_path / "res_reajuste.xlsx")
+    wb = openpyxl.load_workbook(out)
+    ws = wb["Auditoria_Completa"]
+    estado = {
+        ws.cell(row=1, column=c).value: ws.column_dimensions[get_column_letter(c)].hidden
+        for c in range(1, ws.max_column + 1)
+    }
+    assert not estado["NOM_TIPO_MOV"]
+    wb.close()
+
+
+def test_deduplicacion_reajuste_mismo_dia_y_propagacion_identidad():
+    """
+    Verifica que:
+    1. Si un usuario tiene dos registros en la misma fecha máxima (uno de baja normal y otro de reajuste),
+       deduplicate_universo prioriza el registro de reajuste.
+    2. Si un mismo empleado (mismo CLA_TRAB o NOMBRE con distinto correo) tiene una baja antigua
+       y un movimiento más reciente por 'Re-ajuste', se propaga la condición de reajuste
+       y ningún registro suyo se penaliza como riesgo activo.
+    3. Las columnas auxiliares internas (_*) no se filtran al DataFrame final df_completo.
+    """
+    df_uni = pd.DataFrame({
+        "CLA_TRAB": [501, 501, 602, 602],
+        "NOMBRE": [
+            "CARLOS RUIZ",
+            "CARLOS RUIZ",
+            "MARIA TORRES",
+            "MARIA TORRES",
+        ],
+        "FECHA_BAJA": [
+            "10/09/2026",
+            "10/09/2026",
+            "15/01/2025",
+            "20/08/2026",
+        ],
+        "NOM_TIPO_MOV": [
+            "Renuncia",
+            "Baja por Reajuste",  # Mismo día que Renuncia -> debe ganar Reajuste en deduplicado
+            "Terminación de contrato",
+            "Re-ajuste organizacional",  # Movimiento más reciente de Maria Torres (con otro correo)
+        ],
+        "CORREO": [
+            "cruiz@empresa.com",
+            "cruiz@empresa.com",
+            "mtorres_old@empresa.com",
+            "mtorres@empresa.com",
+        ],
+    })
+
+    df_rep = pd.DataFrame({
+        "Full Name": ["CARLOS RUIZ", "MARIA TORRES", "MARIA TORRES"],
+        "Username": ["cruiz@empresa.com", "mtorres_old@empresa.com", "mtorres@empresa.com"],
+        "Active": ["1", "1", "1"],
+        "Last Login": ["25/09/2026", "25/09/2026", "25/09/2026"],
+    })
+
+    col_map = {
+        "name": "Full Name",
+        "user": "Username",
+        "active": "Active",
+        "login": "Last Login",
+        "baja_rep": None,
+    }
+
+    consolidated = consolidate_logins(df_rep, col_map)
+    df_completo, df_riesgos_activos, metrics = execute_audit(
+        df_universo=df_uni,
+        baja_col="FECHA_BAJA",
+        email_col="CORREO",
+        nombre_col="NOMBRE",
+        consolidated_logins=consolidated,
+    )
+
+    assert len(df_riesgos_activos) == 0
+    assert (df_completo["ESTATUS_AUDITORIA"] == "OK").all()
+    assert (df_completo["CATEGORIA_RIESGO"] == "CONFORME").all()
+    assert not any(str(c).startswith("_") for c in df_completo.columns)

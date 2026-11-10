@@ -366,3 +366,78 @@ def test_config_y_carpeta_resultados(tmp_path, monkeypatch):
     respuestas = iter(["n", str(nuevo), "s"])
     monkeypatch.setattr(ab, "_ask", lambda prompt: next(respuestas))
     assert ab.resolve_output_dir({"output_dir": str(destino)}) == nuevo
+
+
+def test_extraer_hoja_universo_y_menu_interactivo(tmp_path, monkeypatch):
+    """
+    Verifica:
+    1. extract_universo_sheet extrae únicamente la pestaña 'BajasU' de un libro con varias hojas.
+    2. El menú interactivo permite elegir archivos registrados por número y extraer la hoja requerida.
+    """
+    import auditor_bajas as ab
+
+    monkeypatch.setenv("AUDITORIA_CONFIG", str(tmp_path / "cfg" / "config.json"))
+
+    # Crear un archivo Universo con múltiples hojas ("Portada", "BajasU", "Historico")
+    multi_uni = tmp_path / "Universo_Completo.xlsx"
+    df_bajas = pd.DataFrame({
+        "CLA_TRAB": [1, 2],
+        "CLA_LOGIN": ["u1", "u2"],
+        "NOMBRE": ["ANA PEREZ", "LUIS GOMEZ"],
+        "FECHA_BAJA": ["01/09/2026", "05/09/2026"],
+        "NOM_TIPO_MOV": ["Reajuste", "Renuncia"],
+        "C6": [None, None],
+        "C7": [None, None],
+        "C8": [None, None],
+        "C9": [None, None],
+        "CORREO": ["ana@empresa.com", "luis@empresa.com"],
+    })
+    df_otra = pd.DataFrame({"INFO": ["Datos irrelevantes", "Mas datos"]})
+
+    with pd.ExcelWriter(multi_uni, engine="openpyxl") as writer:
+        df_otra.to_excel(writer, sheet_name="Portada", index=False)
+        df_bajas.to_excel(writer, sheet_name="BajasU", index=False)
+        df_otra.to_excel(writer, sheet_name="Historico", index=False)
+
+    # Extraer solo la hoja 'BajasU'
+    extracted = ab.extract_universo_sheet(multi_uni, target_sheet_name="BajasU")
+    assert extracted.exists()
+    assert extracted.name == "Universo_Completo_BajasU.xlsx"
+
+    wb = openpyxl.load_workbook(extracted, read_only=True)
+    assert wb.sheetnames == ["BajasU"]
+    wb.close()
+
+    # El archivo extraído debe poder leerse directamente como Universo válido
+    df_leido, baja_col, email_col = ab.read_universo(extracted, target_sheet_name="BajasU")
+    assert len(df_leido) == 2
+    assert baja_col == "FECHA_BAJA"
+    assert email_col == "CORREO"
+
+    # Crear un reporte de prueba y registrar archivos en configuración
+    rep_file = tmp_path / "report999.csv"
+    pd.DataFrame({
+        "Full Name": ["ANA PEREZ", "LUIS GOMEZ"],
+        "Username": ["ana@empresa.com", "luis@empresa.com"],
+        "Active": ["1", "0"],
+        "Last Login": ["10/09/2026", "01/08/2026"],
+    }).to_csv(rep_file, index=False)
+
+    out_dir = tmp_path / "salidas"
+    out_dir.mkdir()
+    cfg = {"output_dir": str(out_dir)}
+    ab.register_file_in_config(cfg, "universo", "universos_registrados", extracted)
+    ab.register_file_in_config(cfg, "ultimo_reporte", "reportes_registrados", rep_file)
+    ab.save_config(cfg)
+
+    # Simular en el menú interactivo:
+    # - Enter (Opción 1: Ejecutar auditoría)
+    # - "1" (Elegir Universo registrado #1)
+    # - "1" (Elegir Reporte registrado #1)
+    # - "s" (Confirmar carpeta de resultados registrada)
+    respuestas = iter(["", "1", "1", "s"])
+    monkeypatch.setattr(ab, "_ask", lambda prompt: next(respuestas))
+    u_sel, r_sel, out_sel = ab.run_interactive_menu(cfg, hoja_universo="BajasU")
+    assert Path(u_sel).resolve() == extracted.resolve()
+    assert Path(r_sel).resolve() == rep_file.resolve()
+    assert out_sel.parent.resolve() == out_dir.resolve()

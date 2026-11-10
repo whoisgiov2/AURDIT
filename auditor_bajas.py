@@ -38,10 +38,11 @@ MATRIZ DE EVALUACIÓN DE RIESGOS Y SEGMENTACIÓN TRIPARTITA:
 2. INCIDENTES RESUELTOS / PASADOS (Evidencia histórica para auditoría, no riesgo vivo):
    - 'MEDIO - INCIDENTE PASADO': Acceso confirmado posterior a la baja (Fecha_Last_Login > Fecha_Baja),
      pero la cuenta ya fue deshabilitada (Active == 0). ESTATUS_AUDITORIA = 'INCIDENTE RESUELTO'.
-3. REINGRESOS Y CASOS OK (Sin riesgo de seguridad):
-   - 'POSIBLE REINGRESO': Usuario activo vigente sin fecha de baja en segundo registro. ESTATUS_AUDITORIA = 'OK'.
-   - 'CONFORME': Control de baja aplicado correctamente (Active == 0 sin acceso post-baja) o colaborador activo vigente.
-     ESTATUS_AUDITORIA = 'OK'.
+    # 3. REINGRESOS Y CASOS OK (Sin riesgo de seguridad):
+    - 'POSIBLE REINGRESO': Usuario activo vigente sin fecha de baja en segundo registro. ESTATUS_AUDITORIA = 'OK'.
+    - 'CONFORME': Control de baja aplicado correctamente (Active == 0 sin acceso post-baja), colaborador activo vigente
+      o movimiento de tipo reajuste en NOM_TIPO_MOV (la cuenta puede permanecer activa sin riesgo).
+      ESTATUS_AUDITORIA = 'OK'.
 
 ESTRUCTURA DE EXPORTACIÓN EN EXCEL (OPENPYXL):
 - Pestaña 1: 'Resumen_Auditoria' (datos cuantitativos de la ejecución: volumen, resultados por categoría e indicadores).
@@ -283,6 +284,42 @@ def find_column_by_name_or_index(
     )
 
 
+def find_tipo_mov_column(df: pd.DataFrame) -> Optional[str]:
+    """Busca de manera resiliente la columna de tipo de movimiento (ej. NOM_TIPO_MOV)."""
+    return find_column_by_substring(
+        df,
+        candidates=[
+            "nom_tipo_mov",
+            "tipo_mov",
+            "tipo mov",
+            "tipo de movimiento",
+            "desc_tipo_mov",
+            "motivo_baja",
+            "motivo de baja",
+        ],
+        default_index=None,
+        column_role="NOM_TIPO_MOV (Tipo de movimiento)",
+    )
+
+
+def detect_reajuste_series(
+    df: pd.DataFrame,
+    tipo_mov_col: Optional[str] = None,
+) -> pd.Series:
+    """
+    Identifica los registros donde la columna NOM_TIPO_MOV indica que el movimiento
+    fue un 'reajuste' (insensible a mayúsculas, acentos, guiones o espacios extra).
+    Si la columna no existe en el DataFrame, devuelve una serie booleana en False.
+    """
+    if tipo_mov_col is None or tipo_mov_col not in df.columns:
+        tipo_mov_col = find_tipo_mov_column(df)
+    if not tipo_mov_col or tipo_mov_col not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+
+    normalized_mov = clean_name_series(df[tipo_mov_col])
+    return normalized_mov.str.contains(r"re[\s\-_]*ajuste", regex=True, na=False)
+
+
 # ============================================================================
 # LECTURA Y VALIDACIÓN DEFENSIVA DE ENTRADAS
 # ============================================================================
@@ -428,6 +465,45 @@ def read_universo(
     )
 
     return df, baja_col, email_col
+
+
+def extract_universo_sheet(
+    source_path: Path | str,
+    output_path: Optional[Path | str] = None,
+    target_sheet_name: str = "BajasU",
+) -> Path:
+    """
+    Extrae únicamente la hoja requerida (por defecto 'BajasU') de un archivo Universo
+    con múltiples hojas y guarda un archivo Excel (.xlsx) ligero que contiene
+    exclusivamente los datos limpios de dicha pestaña.
+    """
+    src = Path(source_path).expanduser().resolve()
+    df_sheet, _, _ = read_universo(src, target_sheet_name=target_sheet_name)
+
+    if output_path is not None:
+        dest = Path(output_path).expanduser()
+    else:
+        suffix_tag = f"_{target_sheet_name}"
+        if src.stem.lower().endswith(suffix_tag.lower()):
+            dest = src.parent / f"{src.stem}_unico.xlsx"
+        else:
+            dest = src.parent / f"{src.stem}{suffix_tag}.xlsx"
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # Manejo defensivo si el archivo destino está abierto en Excel
+    try:
+        if dest.exists():
+            with open(dest, "r+b"):
+                pass
+    except (PermissionError, IOError):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = dest.parent / f"{dest.stem}_{timestamp}{dest.suffix}"
+
+    with pd.ExcelWriter(dest, engine="openpyxl") as writer:
+        df_sheet.to_excel(writer, sheet_name=target_sheet_name, index=False)
+
+    return dest.resolve()
 
 
 def read_reporte_logins(file_path: Path | str) -> tuple[pd.DataFrame, Dict[str, Optional[str]]]:
@@ -675,10 +751,12 @@ def deduplicate_universo(
         clean_name = pd.Series("", index=df_work.index)
 
     parsed_baja = robust_parse_dates(df_work[baja_col])
+    is_reajuste = detect_reajuste_series(df_work)
 
     df_work["_clean_email"] = clean_email
     df_work["_clean_name"] = clean_name
     df_work["_parsed_baja"] = parsed_baja
+    df_work["_is_reajuste"] = is_reajuste
     df_work["_key_compuesta"] = np.where(
         clean_email.notna(),
         clean_email + "___" + clean_name,
@@ -702,8 +780,11 @@ def deduplicate_universo(
                     reingreso_keys.add(key)
                     indices_to_keep.extend(grp.index.tolist())
                 elif grp["_parsed_baja"].notna().all():
-                    # Paso 2: Múltiples bajas -> conservar únicamente la más reciente (máxima)
-                    sorted_grp = grp.sort_values(by="_parsed_baja", ascending=False)
+                    # Paso 2: Múltiples bajas -> conservar la más reciente (en empate de fecha, priorizar reajuste)
+                    sorted_grp = grp.sort_values(
+                        by=["_parsed_baja", "_is_reajuste"],
+                        ascending=[False, False],
+                    )
                     indices_to_keep.append(sorted_grp.index[0])
                 else:
                     indices_to_keep.append(grp.index[0])
@@ -815,6 +896,8 @@ def execute_audit(
     email_col: str,
     consolidated_logins: pd.DataFrame,
     nombre_col: Optional[str] = None,
+    reingreso_keys_override: Optional[set[str]] = None,
+    _already_deduplicated: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, AuditMetrics]:
     """
     Ejecuta el cruce vectorizado con VALIDACIÓN COMPUESTA (Correo + Nombre Completo)
@@ -839,6 +922,9 @@ def execute_audit(
 
     4. Matriz de Clasificación de Riesgo:
        Para registros con fecha de baja válida que no correspondan a un reingreso vigente:
+       - Movimiento con NOM_TIPO_MOV de tipo 'reajuste':
+         -> ESTATUS_AUDITORIA: 'OK'
+         -> CATEGORIA_RIESGO: 'CONFORME'
        - Acceso Post-Baja (SÍ) & Active == 1:
          -> ESTATUS_AUDITORIA: 'REVISAR'
          -> CATEGORIA_RIESGO: 'CRÍTICO - RIESGO ACTIVO'
@@ -859,12 +945,18 @@ def execute_audit(
     - metrics: Métricas consolidadas.
     """
     # 0. Deduplicación cronológica del Universo (Paso 1 y Paso 2)
-    uni, reingreso_keys_dedup = deduplicate_universo(
-        df_universo=df_universo,
-        baja_col=baja_col,
-        email_col=email_col,
-        nombre_col=nombre_col,
-    )
+    if _already_deduplicated and reingreso_keys_override is not None:
+        uni = df_universo.copy().reset_index(drop=True)
+        reingreso_keys_dedup = set(reingreso_keys_override)
+    else:
+        uni, reingreso_keys_dedup = deduplicate_universo(
+            df_universo=df_universo,
+            baja_col=baja_col,
+            email_col=email_col,
+            nombre_col=nombre_col,
+        )
+        if reingreso_keys_override:
+            reingreso_keys_dedup = reingreso_keys_dedup | set(reingreso_keys_override)
 
     # Detección de columna de Nombre si no fue provista
     if nombre_col is None or nombre_col not in uni.columns:
@@ -875,19 +967,34 @@ def execute_audit(
             column_role="Nombre Completo (Columna C / Índice 2)",
         )
 
-    # Normalización de correo y nombre completo
+    # Conservar lista de columnas originales del Universo antes de columnas auxiliares
+    original_uni_cols = list(uni.columns)
+
+    # Normalización de correo y nombre completo del Universo
     uni["_clean_email"] = clean_identifier_series(uni[email_col])
+    if nombre_col and nombre_col in uni.columns:
+        uni["_clean_name_uni"] = clean_name_series(uni[nombre_col])
+    else:
+        uni["_clean_name_uni"] = ""
+
     has_report_names = (
         "_clean_name" in consolidated_logins.columns
         and (consolidated_logins["_clean_name"].astype(str).str.len() > 0).any()
     )
     if has_report_names and nombre_col:
-        uni["_clean_name"] = clean_name_series(uni[nombre_col])
+        uni["_clean_name"] = uni["_clean_name_uni"]
     else:
         uni["_clean_name"] = ""
     uni["_parsed_baja_uni"] = robust_parse_dates(uni[baja_col])
 
-    # Generación de la Llave Compuesta en Universo
+    # Llave de identidad completa en Universo (para trazabilidad con deduplicate_universo)
+    uni["_key_uni_full"] = np.where(
+        uni["_clean_email"].notna(),
+        uni["_clean_email"] + "___" + uni["_clean_name_uni"],
+        None,
+    )
+
+    # Generación de la Llave Compuesta de cruce contra el Reporte
     uni["_key_compuesta"] = np.where(
         uni["_clean_email"].notna(),
         uni["_clean_email"] + "___" + uni["_clean_name"],
@@ -952,9 +1059,9 @@ def execute_audit(
                 reingreso_emails.add(email_val)
 
     reingreso_names = set()
-    if "_clean_name" in merged.columns and (merged["_clean_name"].astype(str).str.len() > 0).any():
-        valid_names = merged["_clean_name"].astype(str).str.len() > 0
-        for name_val, group in merged[valid_names].groupby("_clean_name"):
+    if "_clean_name_uni" in merged.columns and (merged["_clean_name_uni"].astype(str).str.len() > 0).any():
+        valid_names = merged["_clean_name_uni"].astype(str).str.len() > 0
+        for name_val, group in merged[valid_names].groupby("_clean_name_uni"):
             bajas_in_group = group["_parsed_baja_uni"].combine_first(
                 group["_parsed_baja_rep"] if "_parsed_baja_rep" in group.columns else pd.Series(pd.NaT, index=group.index)
             )
@@ -978,21 +1085,75 @@ def execute_audit(
 
     is_reingreso = (
         (merged["_clean_email"].isin(reingreso_emails))
-        | (merged["_clean_name"].isin(reingreso_names))
+        | (merged["_clean_name_uni"].isin(reingreso_names))
         | (merged[trab_col].isin(reingreso_trab) if trab_col and trab_col in merged.columns else pd.Series(False, index=merged.index))
         | (merged["_key_compuesta"].isin(reingreso_keys_dedup))
+        | (merged["_key_uni_full"].isin(reingreso_keys_dedup))
+    )
+
+    # -------------------------------------------------------------------------
+    # Detección de Reajustes en NOM_TIPO_MOV (y resolución cronológica por identidad)
+    # -------------------------------------------------------------------------
+    # Si la columna NOM_TIPO_MOV indica que la baja fue en realidad un reajuste,
+    # o si el movimiento más reciente del colaborador (por correo, nombre o CLA_TRAB)
+    # fue un reajuste, la cuenta no tiene inconveniente en continuar activa ni en
+    # registrar logins, por lo que se evalúa como CONFORME (ESTATUS_AUDITORIA = 'OK').
+    is_reajuste_row = detect_reajuste_series(merged)
+    merged["_is_reajuste_row"] = is_reajuste_row
+    merged["_fecha_baja_final"] = fecha_baja_final
+
+    def _latest_is_reajuste(grp: pd.DataFrame) -> bool:
+        if len(grp) <= 1:
+            return bool(grp["_is_reajuste_row"].iloc[0])
+        valid_b = grp[grp["_fecha_baja_final"].notna()]
+        if valid_b.empty:
+            return bool(grp["_is_reajuste_row"].any())
+        max_dt = valid_b["_fecha_baja_final"].max()
+        return bool(valid_b.loc[valid_b["_fecha_baja_final"] == max_dt, "_is_reajuste_row"].any())
+
+    reajuste_emails = set()
+    if has_email.any():
+        for email_val, group in merged[has_email].groupby("_clean_email"):
+            if len(group) > 1 and _latest_is_reajuste(group):
+                reajuste_emails.add(email_val)
+
+    reajuste_names = set()
+    if "_clean_name_uni" in merged.columns and (merged["_clean_name_uni"].astype(str).str.len() > 0).any():
+        valid_names = merged["_clean_name_uni"].astype(str).str.len() > 0
+        for name_val, group in merged[valid_names].groupby("_clean_name_uni"):
+            if len(group) > 1 and _latest_is_reajuste(group):
+                reajuste_names.add(name_val)
+
+    reajuste_trab = set()
+    if trab_col and trab_col in merged.columns:
+        valid_trab = merged[trab_col].notna() & ~merged[trab_col].astype(str).str.strip().isin(["", "0", "0.0", "nan"])
+        for trab_val, group in merged[valid_trab].groupby(trab_col):
+            if len(group) > 1 and _latest_is_reajuste(group):
+                reajuste_trab.add(trab_val)
+
+    is_reajuste = (
+        is_reajuste_row
+        | (merged["_clean_email"].isin(reajuste_emails))
+        | (merged["_clean_name_uni"].isin(reajuste_names))
+        | (merged[trab_col].isin(reajuste_trab) if trab_col and trab_col in merged.columns else pd.Series(False, index=merged.index))
     )
 
     # -------------------------------------------------------------------------
     # Reglas de Auditoría y Matriz de Riesgo Tripartita
     # -------------------------------------------------------------------------
-    acceso_post_baja = has_valid_baja & has_valid_login & (merged["_parsed_login_date"] > fecha_baja_final) & ~is_reingreso
+    acceso_post_baja = (
+        has_valid_baja
+        & has_valid_login
+        & (merged["_parsed_login_date"] > fecha_baja_final)
+        & ~is_reingreso
+        & ~is_reajuste
+    )
 
     cond_reingreso = is_reingreso
-    cond_critico = ~is_reingreso & has_valid_baja & acceso_post_baja & is_active_account
-    cond_alto = ~is_reingreso & has_valid_baja & ~acceso_post_baja & is_active_account
-    cond_medio = ~is_reingreso & has_valid_baja & acceso_post_baja & ~is_active_account
-    cond_conforme = ~is_reingreso & (~has_valid_baja | (~acceso_post_baja & ~is_active_account))
+    cond_critico = ~is_reingreso & ~is_reajuste & has_valid_baja & acceso_post_baja & is_active_account
+    cond_alto = ~is_reingreso & ~is_reajuste & has_valid_baja & ~acceso_post_baja & is_active_account
+    cond_medio = ~is_reingreso & ~is_reajuste & has_valid_baja & acceso_post_baja & ~is_active_account
+    cond_conforme = ~is_reingreso & (is_reajuste | ~has_valid_baja | (~acceso_post_baja & ~is_active_account))
 
     # ESTATUS_AUDITORIA: 'REVISAR', 'INCIDENTE RESUELTO', 'OK'
     estatus_conditions = [
@@ -1052,8 +1213,8 @@ def execute_audit(
         np.where(is_active_account, "Activa", "Inactiva"),
     )
 
-    # Construcción de DataFrame Completo (conserva todas las columnas originales intactas)
-    df_completo = uni.copy()
+    # Construcción de DataFrame Completo (conserva todas las columnas originales intactas sin columnas auxiliares _*)
+    df_completo = uni[original_uni_cols].copy()
 
     # Normalizar FECHA_BAJA visualmente a DD/MM/YYYY donde exista fecha válida
     if isinstance(df_completo[baja_col], pd.DataFrame):
@@ -1211,9 +1372,9 @@ _COLUMNAS_VISIBLES_CALCULADAS = {
 def _es_columna_relevante(header: Any) -> bool:
     """
     Indica si una columna de 'Auditoria_Completa' debe verse al abrir el libro:
-    nombre, clave (cla_*), ubicación, fecha de baja y las columnas calculadas de
-    _COLUMNAS_VISIBLES_CALCULADAS. Los nombres del Universo varían, por lo que se
-    compara el encabezado normalizado (sin acentos, minúsculas).
+    nombre, clave (cla_*), ubicación, fecha de baja, tipo de movimiento (NOM_TIPO_MOV)
+    y las columnas calculadas de _COLUMNAS_VISIBLES_CALCULADAS. Los nombres del Universo
+    varían, por lo que se compara el encabezado normalizado (sin acentos, minúsculas).
     """
     texto = normalize_text_name(header).replace("_", " ")
     if str(header).strip().upper() in _COLUMNAS_VISIBLES_CALCULADAS:
@@ -1223,6 +1384,8 @@ def _es_columna_relevante(header: Any) -> bool:
     if re.match(r"^cla(ve)?\b", texto):
         return True
     if "ubicaci" in texto:
+        return True
+    if "tipo mov" in texto or texto == "tipo de movimiento":
         return True
     return texto == "baja" or ("baja" in texto and ("fecha" in texto or "fec " in texto))
 
@@ -1833,7 +1996,7 @@ def get_config_path() -> Path:
     return Path.home() / ".auditoria_accesos" / "config.json"
 
 
-def load_config() -> Dict[str, str]:
+def load_config() -> Dict[str, Any]:
     """Lee la configuración guardada; devuelve {} si no existe o es inválida."""
     try:
         data = json.loads(get_config_path().read_text(encoding="utf-8"))
@@ -1842,7 +2005,7 @@ def load_config() -> Dict[str, str]:
         return {}
 
 
-def save_config(config: Dict[str, str]) -> None:
+def save_config(config: Dict[str, Any]) -> None:
     """Guarda la configuración; un fallo de escritura nunca interrumpe la auditoría."""
     path = get_config_path()
     try:
@@ -1850,6 +2013,130 @@ def save_config(config: Dict[str, str]) -> None:
         path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as exc:
         print(f"[AVISO] No se pudo guardar la configuración en '{path}': {exc}")
+
+
+def register_file_in_config(
+    config: Dict[str, Any],
+    single_key: str,
+    list_key: str,
+    file_path: Path | str,
+    max_items: int = 8,
+) -> None:
+    """Registra un archivo como activo y lo mantiene en el historial de archivos recientes."""
+    resolved = str(Path(file_path).expanduser().resolve())
+    config[single_key] = resolved
+    existing = config.get(list_key)
+    history: list[str] = [str(p) for p in existing] if isinstance(existing, list) else []
+    history = [resolved] + [p for p in history if p.lower() != resolved.lower()]
+    config[list_key] = history[:max_items]
+
+
+def get_universo_candidates(
+    config: Optional[Dict[str, Any]] = None,
+    suggested: Optional[str] = None,
+    search_dir: Path | str = ".",
+    hoja_universo: str = "BajasU",
+) -> list[tuple[str, Path]]:
+    """
+    Reúne los archivos Universo disponibles (registrados en configuración, hojas extraídas
+    y detectados automáticamente en la carpeta) sin duplicados y verificando que existan.
+    """
+    cfg = config or {}
+    candidates: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+
+    def _add(label: str, raw_path: Optional[str | Path]) -> None:
+        if not raw_path:
+            return
+        try:
+            p = Path(raw_path).expanduser()
+            if not p.is_file():
+                return
+            key = str(p.resolve()).lower()
+            if key not in seen:
+                seen.add(key)
+                candidates.append((label, p.resolve()))
+        except OSError:
+            return
+
+    if suggested:
+        _add("Sugerido", suggested)
+
+    reg_main = cfg.get("universo")
+    if reg_main:
+        _add("Registrado activo", reg_main)
+        # Si existe una versión extraída de la hoja junto al Universo registrado, ofrecerla también
+        try:
+            reg_p = Path(reg_main).expanduser()
+            extracted_sibling = reg_p.parent / f"{reg_p.stem}_{hoja_universo}.xlsx"
+            if extracted_sibling.is_file():
+                _add(f"Hoja '{hoja_universo}' extraída", extracted_sibling)
+        except OSError:
+            pass
+
+    for prev in cfg.get("universos_registrados", []) if isinstance(cfg.get("universos_registrados"), list) else []:
+        _add("Registrado previo", prev)
+
+    auto_uni, _ = auto_detect_input_files(search_dir)
+    if auto_uni:
+        _add("Detectado en carpeta", auto_uni)
+
+    return candidates
+
+
+def get_reporte_candidates(
+    config: Optional[Dict[str, Any]] = None,
+    suggested: Optional[str] = None,
+    search_dir: Path | str = ".",
+) -> list[tuple[str, Path]]:
+    """
+    Reúne los archivos de Reporte de Logins disponibles (detectados en la carpeta actual,
+    en la carpeta del Universo registrado o en el historial de configuración).
+    """
+    cfg = config or {}
+    candidates: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+
+    def _add(label: str, raw_path: Optional[str | Path]) -> None:
+        if not raw_path:
+            return
+        try:
+            p = Path(raw_path).expanduser()
+            if not p.is_file():
+                return
+            key = str(p.resolve()).lower()
+            if key not in seen:
+                seen.add(key)
+                candidates.append((label, p.resolve()))
+        except OSError:
+            return
+
+    if suggested:
+        _add("Detectado / Sugerido", suggested)
+
+    _, auto_rep = auto_detect_input_files(search_dir)
+    if auto_rep:
+        _add("Detectado en carpeta", auto_rep)
+
+    # Buscar también reportes en la carpeta donde reside el Universo registrado
+    reg_uni = cfg.get("universo")
+    if reg_uni:
+        try:
+            uni_dir = Path(reg_uni).expanduser().parent
+            if uni_dir.is_dir():
+                _, auto_rep_uni = auto_detect_input_files(uni_dir)
+                if auto_rep_uni:
+                    _add("Detectado junto a Universo", auto_rep_uni)
+        except OSError:
+            pass
+
+    if cfg.get("ultimo_reporte"):
+        _add("Último reporte usado", cfg.get("ultimo_reporte"))
+
+    for prev in cfg.get("reportes_registrados", []) if isinstance(cfg.get("reportes_registrados"), list) else []:
+        _add("Registrado previo", prev)
+
+    return candidates
 
 
 def _clean_path_input(raw: str) -> str:
@@ -1883,8 +2170,70 @@ def _is_inside(path: Path, parent: Path) -> bool:
         return False
 
 
-def prompt_universo_path(suggested: Optional[str] = None) -> str:
-    """Solicita la ruta del archivo Universo hasta obtener un archivo existente."""
+def prompt_universo_path(
+    suggested: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+    hoja_universo: str = "BajasU",
+) -> str:
+    """
+    Solicita el archivo Universo mostrando una lista numerada de archivos ya registrados
+    o detectados para seleccionarlos fácilmente con un número o Enter, además de permitir
+    extraer únicamente la hoja necesaria ('BajasU') o ingresar otra ruta manualmente.
+    """
+    candidates = get_universo_candidates(config=config, suggested=suggested, hoja_universo=hoja_universo)
+
+    if candidates:
+        print("\n" + "-" * 78)
+        print(f" SELECCIÓN DE ARCHIVO UNIVERSO (Pestaña requerida: '{hoja_universo}')")
+        print("-" * 78)
+        for idx, (label, path_obj) in enumerate(candidates, start=1):
+            print(f"   [{idx}] ({label}) {path_obj.name}")
+            print(f"       Ruta: {path_obj}")
+        print(f"   [E] Extraer solo la hoja '{hoja_universo}' a un archivo único ligero y usarlo")
+        print(f"   [M] Ingresar otra ruta manualmente (o arrastrar archivo a la consola)")
+        print("-" * 78)
+
+        while True:
+            raw = _clean_path_input(
+                _ask(f"Seleccione una opción [1-{len(candidates)}, E, M] o Enter para [1]: ")
+            )
+            if not raw:
+                return str(candidates[0][1])
+
+            if raw.isdigit():
+                choice_idx = int(raw)
+                if 1 <= choice_idx <= len(candidates):
+                    return str(candidates[choice_idx - 1][1])
+                print(f"    [ERROR] Elija un número entre 1 y {len(candidates)}.")
+                continue
+
+            if raw.lower() in ("e", "extraer"):
+                extracted = prompt_extract_universo_interactive(
+                    config=config if config is not None else {},
+                    hoja_universo=hoja_universo,
+                    candidates=candidates,
+                )
+                if extracted is not None:
+                    return str(extracted)
+                continue
+
+            if raw.lower() in ("m", "manual", "o", "otra"):
+                raw_manual = _clean_path_input(_ask("Arrastre o escriba la ruta del archivo Universo: "))
+                if not raw_manual:
+                    print("    Debe indicar una ruta.")
+                    continue
+                path_manual = Path(raw_manual).expanduser()
+                if path_manual.is_file():
+                    return str(path_manual)
+                print(f"    [ERROR] No existe el archivo: '{path_manual}'")
+                continue
+
+            # Si el usuario pegó o arrastró directamente la ruta de un archivo
+            direct_path = Path(raw).expanduser()
+            if direct_path.is_file():
+                return str(direct_path)
+            print(f"    [ERROR] Opción o ruta no válida: '{raw}'")
+
     while True:
         hint = f" [{suggested}]" if suggested else ""
         raw = _clean_path_input(_ask(f"Ruta del archivo Universo{hint}: "))
@@ -1896,6 +2245,139 @@ def prompt_universo_path(suggested: Optional[str] = None) -> str:
         if path.is_file():
             return str(path)
         print(f"    [ERROR] No existe el archivo: '{path}'")
+
+
+def prompt_reporte_path(
+    suggested: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Solicita el archivo de Reporte de Logins mostrando opciones numeradas con los
+    reportes detectados o usados recientemente, o permite arrastrar/escribir otra ruta.
+    """
+    candidates = get_reporte_candidates(config=config, suggested=suggested)
+
+    if candidates:
+        print("\n" + "-" * 78)
+        print(" SELECCIÓN DE ARCHIVO REPORTE DE LOGINS")
+        print("-" * 78)
+        for idx, (label, path_obj) in enumerate(candidates, start=1):
+            print(f"   [{idx}] ({label}) {path_obj.name}")
+            print(f"       Ruta: {path_obj}")
+        print("   [M] Ingresar otra ruta manualmente (o arrastrar archivo a la consola)")
+        print("-" * 78)
+
+        while True:
+            raw = _clean_path_input(
+                _ask(f"Seleccione una opción [1-{len(candidates)}, M] o Enter para [1]: ")
+            )
+            if not raw:
+                return str(candidates[0][1])
+
+            if raw.isdigit():
+                choice_idx = int(raw)
+                if 1 <= choice_idx <= len(candidates):
+                    return str(candidates[choice_idx - 1][1])
+                print(f"    [ERROR] Elija un número entre 1 y {len(candidates)}.")
+                continue
+
+            if raw.lower() in ("m", "manual", "o", "otra"):
+                raw_manual = _clean_path_input(_ask("Arrastre o escriba la ruta del Reporte de Logins: "))
+                if not raw_manual:
+                    print("    Debe indicar una ruta.")
+                    continue
+                path_manual = Path(raw_manual).expanduser()
+                if path_manual.is_file():
+                    return str(path_manual)
+                print(f"    [ERROR] No existe el archivo: '{path_manual}'")
+                continue
+
+            direct_path = Path(raw).expanduser()
+            if direct_path.is_file():
+                return str(direct_path)
+            print(f"    [ERROR] Opción o ruta no válida: '{raw}'")
+
+    while True:
+        raw = _clean_path_input(_ask("Ingrese la ruta del Archivo Reporte de Logins: "))
+        if not raw:
+            print("    Debe indicar una ruta.")
+            continue
+        path = Path(raw).expanduser()
+        if path.is_file():
+            return str(path)
+        print(f"    [ERROR] No existe el archivo: '{path}'")
+
+
+def prompt_extract_universo_interactive(
+    config: Dict[str, Any],
+    hoja_universo: str = "BajasU",
+    candidates: Optional[list[tuple[str, Path]]] = None,
+) -> Optional[Path]:
+    """
+    Flujo interactivo para extraer únicamente la pestaña necesaria (ej. 'BajasU')
+    desde un archivo Universo completo hacia un archivo Excel único y ligero,
+    registrándolo automáticamente para facilitar su uso.
+    """
+    if candidates is None:
+        candidates = get_universo_candidates(config=config, hoja_universo=hoja_universo)
+
+    print("\n" + "=" * 78)
+    print(f" EXTRACCIÓN DE HOJA ÚNICA ('{hoja_universo}') DESDE ARCHIVO UNIVERSO")
+    print("=" * 78)
+
+    source_file: Optional[Path] = None
+    if candidates:
+        print(" Archivos Universo disponibles como origen:")
+        for idx, (label, path_obj) in enumerate(candidates, start=1):
+            print(f"   [{idx}] ({label}) {path_obj.name} ({path_obj})")
+        print("   [M] Indicar otro archivo Universo manualmente")
+        raw_src = _clean_path_input(
+            _ask(f"Seleccione el archivo origen [1-{len(candidates)}, M] o Enter para [1]: ")
+        )
+        if not raw_src:
+            source_file = candidates[0][1]
+        elif raw_src.isdigit() and 1 <= int(raw_src) <= len(candidates):
+            source_file = candidates[int(raw_src) - 1][1]
+        elif raw_src.lower() not in ("m", "manual", "o", "otra"):
+            p_try = Path(raw_src).expanduser()
+            if p_try.is_file():
+                source_file = p_try.resolve()
+
+    while source_file is None:
+        raw_manual = _clean_path_input(_ask("Ruta del archivo Universo origen: "))
+        if not raw_manual:
+            return None
+        p_manual = Path(raw_manual).expanduser()
+        if p_manual.is_file():
+            source_file = p_manual.resolve()
+        else:
+            print(f"    [ERROR] No existe el archivo: '{p_manual}'")
+
+    default_dest = source_file.parent / f"{source_file.stem}_{hoja_universo}.xlsx"
+    raw_dest = _clean_path_input(
+        _ask(f"Ruta de salida para el archivo con solo la hoja '{hoja_universo}' [{default_dest}]: ")
+    )
+    dest_path = Path(raw_dest).expanduser() if raw_dest else default_dest
+    if dest_path.is_dir():
+        dest_path = dest_path / f"{source_file.stem}_{hoja_universo}.xlsx"
+    elif dest_path.suffix.lower() != ".xlsx":
+        dest_path = dest_path.with_suffix(".xlsx")
+
+    try:
+        print(f"\n[+] Extrayendo la pestaña '{hoja_universo}' desde '{source_file.name}'...")
+        saved_sheet_file = extract_universo_sheet(
+            source_path=source_file,
+            output_path=dest_path,
+            target_sheet_name=hoja_universo,
+        )
+        print(f"    -> Archivo ligero generado exitosamente: {saved_sheet_file}")
+        register_file_in_config(config, "universo", "universos_registrados", saved_sheet_file)
+        save_config(config)
+        print("    -> Quedó registrado como el archivo Universo activo predeterminado.")
+        return saved_sheet_file
+    except Exception as exc:
+        print(f"    [ERROR] No se pudo extraer la hoja '{hoja_universo}': {exc}")
+        return None
 
 
 def prompt_new_output_dir() -> Path:
@@ -2004,6 +2486,8 @@ def run_audit_pipeline(
         baja_col=baja_col,
         email_col=email_col,
         consolidated_logins=consolidated_logins,
+        reingreso_keys_override=reingreso_keys,
+        _already_deduplicated=True,
     )
 
     # 5. Exportación y formateo profesional en 5 pestañas
@@ -2019,6 +2503,110 @@ def run_audit_pipeline(
     # 6. Resumen ejecutivo
     print_summary_box(metrics, saved_file)
     return saved_file, metrics
+
+
+def run_interactive_menu(
+    config: Dict[str, Any],
+    hoja_universo: str = "BajasU",
+    preset_universo: Optional[str] = None,
+    preset_reporte: Optional[str] = None,
+    preset_salida: Optional[str] = None,
+    preset_carpeta: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str], Optional[Path]]:
+    """
+    Muestra un menú interactivo amigable en CMD que presenta los archivos registrados
+    (Universo, Reporte, Carpeta de salida) y permite:
+      [1] Ejecutar la auditoría seleccionando archivos registrados con un número o Enter.
+      [2] Extraer únicamente la hoja requerida ('BajasU') del Universo en un archivo único.
+      [3] Cambiar la carpeta de resultados registrada.
+      [4] Salir.
+    """
+    # Si el usuario ya pasó --universo o --reporte parciales por CLI, ir directo al flujo asistido
+    skip_main_menu = bool(preset_universo or preset_reporte or preset_salida or preset_carpeta)
+
+    while True:
+        if not skip_main_menu:
+            uni_cands = get_universo_candidates(config=config, hoja_universo=hoja_universo)
+            rep_cands = get_reporte_candidates(config=config)
+            uni_actual = str(uni_cands[0][1]) if uni_cands else "No registrado aún"
+            rep_actual = str(rep_cands[0][1]) if rep_cands else "No detectado aún"
+            out_actual = config.get("output_dir") or "No configurada aún"
+
+            border = "=" * 78
+            divider = "-" * 78
+            print("\n" + border)
+            print("       SISTEMA DE AUDITORÍA DE ACCESOS POST-BAJA — MENÚ INTERACTIVO       ")
+            print(border)
+            print(" Estado actual de archivos y rutas:")
+            print(f"   * Universo principal : {uni_actual}")
+            print(f"   * Pestaña Universo   : {hoja_universo}")
+            print(f"   * Reporte disponible : {rep_actual}")
+            print(f"   * Carpeta resultados : {out_actual}")
+            print(divider)
+            print(" ¿Qué desea hacer?")
+            print("   [1] Ejecutar auditoría de accesos (seleccionar archivos registrados o nuevos)")
+            print(f"   [2] Extraer solo la hoja '{hoja_universo}' del Universo a un archivo único ligero")
+            print("   [3] Cambiar carpeta de resultados registrada")
+            print("   [4] Salir")
+            print(border)
+
+            choice = _clean_path_input(_ask("Seleccione una opción [1-4] (Enter = 1): ")).lower()
+            if choice in ("4", "salir", "exit", "q"):
+                print("\n[INFO] Saliendo del asistente de auditoría.")
+                return None, None, None
+            if choice == "2":
+                extracted = prompt_extract_universo_interactive(config=config, hoja_universo=hoja_universo)
+                if extracted is not None and _ask_yes_no("¿Desea ejecutar la auditoría ahora con este archivo extraído?"):
+                    preset_universo = str(extracted)
+                    skip_main_menu = True
+                else:
+                    continue
+            elif choice == "3":
+                new_dir = prompt_new_output_dir()
+                config["output_dir"] = str(new_dir.resolve())
+                save_config(config)
+                print(f"    -> Carpeta de resultados actualizada: {config['output_dir']}")
+                continue
+            elif choice not in ("", "1"):
+                print("    [AVISO] Elija una opción válida (1, 2, 3 o 4).")
+                continue
+
+        # Flujo de ejecución de auditoría (Opción 1)
+        auto_uni, auto_rep = auto_detect_input_files(".")
+        universo_file = preset_universo
+        if not universo_file:
+            suggested_uni = str(auto_uni) if auto_uni else config.get("universo")
+            universo_file = prompt_universo_path(
+                suggested=suggested_uni,
+                config=config,
+                hoja_universo=hoja_universo,
+            )
+
+        reporte_file = preset_reporte
+        if not reporte_file:
+            suggested_rep = str(auto_rep) if auto_rep else config.get("ultimo_reporte")
+            reporte_file = prompt_reporte_path(
+                suggested=suggested_rep,
+                config=config,
+            )
+
+        if preset_salida:
+            output_path = Path(preset_salida).expanduser()
+        else:
+            if preset_carpeta:
+                output_dir = Path(preset_carpeta).expanduser()
+                if _is_inside(output_dir, SCRIPT_DIR):
+                    raise ValueError("La carpeta de resultados debe estar fuera de la carpeta de scripts.")
+                output_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                output_dir = resolve_output_dir(config)
+            config["output_dir"] = str(output_dir.resolve())
+            output_path = output_dir / build_output_name()
+
+        register_file_in_config(config, "universo", "universos_registrados", universo_file)
+        register_file_in_config(config, "ultimo_reporte", "reportes_registrados", reporte_file)
+        save_config(config)
+        return universo_file, reporte_file, output_path
 
 
 def main() -> int:
@@ -2039,6 +2627,14 @@ def main() -> int:
         type=str,
         default="BajasU",
         help="Nombre de la pestaña a leer en el archivo Universo (por defecto: BajasU)",
+    )
+    parser.add_argument(
+        "--extraer-hoja",
+        nargs="?",
+        const="__AUTO__",
+        default=None,
+        metavar="RUTA_DESTINO",
+        help="Extrae únicamente la hoja requerida del Universo a un archivo Excel independiente",
     )
     parser.add_argument(
         "-r",
@@ -2070,45 +2666,75 @@ def main() -> int:
     config = load_config()
 
     try:
-        # 1. Archivo Universo: argumento, o pregunta (sugiriendo detección automática / última ruta)
-        universo_file = args.universo
-        if not universo_file:
-            auto_uni, auto_rep = auto_detect_input_files(".")
-            suggested = str(auto_uni) if auto_uni else config.get("universo")
-            universo_file = prompt_universo_path(suggested)
-            if not args.reporte and auto_rep:
-                args.reporte = str(auto_rep)
-                print(f"[INFO] Reporte de Logins detectado automáticamente: {auto_rep.name}")
+        # Modo extracción directa por línea de comandos (--extraer-hoja)
+        if args.extraer_hoja is not None:
+            uni_src = args.universo or config.get("universo")
+            if not uni_src:
+                extracted_path = prompt_extract_universo_interactive(
+                    config=config,
+                    hoja_universo=args.hoja_universo,
+                )
+                if extracted_path is None:
+                    return 1
+                if not args.reporte:
+                    return 0
+                args.universo = str(extracted_path)
+            else:
+                if not Path(uni_src).is_file():
+                    print(f"\n[ERROR] El archivo Universo '{uni_src}' no existe.", file=sys.stderr)
+                    return 1
+                dest_extract = None if args.extraer_hoja == "__AUTO__" else args.extraer_hoja
+                extracted_path = extract_universo_sheet(
+                    source_path=uni_src,
+                    output_path=dest_extract,
+                    target_sheet_name=args.hoja_universo,
+                )
+                register_file_in_config(config, "universo", "universos_registrados", extracted_path)
+                save_config(config)
+                print(f"\n[+] Hoja '{args.hoja_universo}' extraída exitosamente en: {extracted_path}")
+                if not args.reporte:
+                    return 0
+                args.universo = str(extracted_path)
 
-        # 2. Reporte de logins
-        reporte_file = args.reporte
-        if not reporte_file:
-            reporte_file = _clean_path_input(_ask("Ingrese la ruta del Archivo Reporte de Logins: "))
+        # Si ya vienen todos los parámetros no interactivos por CLI
+        if args.universo and args.reporte and (args.salida or args.carpeta_resultados):
+            universo_file = args.universo
+            reporte_file = args.reporte
+            if not Path(universo_file).is_file():
+                print(f"\n[ERROR] El archivo Universo '{universo_file}' no existe.", file=sys.stderr)
+                return 1
+            if not Path(reporte_file).is_file():
+                print(f"\n[ERROR] El archivo Reporte de Logins '{reporte_file}' no existe.", file=sys.stderr)
+                return 1
 
-        if not Path(universo_file).is_file():
-            print(f"\n[ERROR] El archivo Universo '{universo_file}' no existe.", file=sys.stderr)
-            return 1
-        if not Path(reporte_file).is_file():
-            print(f"\n[ERROR] El archivo Reporte de Logins '{reporte_file}' no existe.", file=sys.stderr)
-            return 1
-
-        # 3. Destino de resultados
-        if args.salida:
-            output_path = Path(args.salida)
-        else:
-            if args.carpeta_resultados:
+            if args.salida:
+                output_path = Path(args.salida)
+            else:
                 output_dir = Path(args.carpeta_resultados).expanduser()
                 if _is_inside(output_dir, SCRIPT_DIR):
                     print("\n[ERROR] La carpeta de resultados debe estar fuera de la carpeta de scripts.", file=sys.stderr)
                     return 1
                 output_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                output_dir = resolve_output_dir(config)
-            config["output_dir"] = str(output_dir.resolve())
-            output_path = output_dir / build_output_name()
+                config["output_dir"] = str(output_dir.resolve())
+                output_path = output_dir / build_output_name()
 
-        config["universo"] = str(Path(universo_file).resolve())
-        save_config(config)
+            register_file_in_config(config, "universo", "universos_registrados", universo_file)
+            register_file_in_config(config, "ultimo_reporte", "reportes_registrados", reporte_file)
+            save_config(config)
+        else:
+            universo_file, reporte_file, output_path = run_interactive_menu(
+                config=config,
+                hoja_universo=args.hoja_universo,
+                preset_universo=args.universo,
+                preset_reporte=args.reporte,
+                preset_salida=args.salida,
+                preset_carpeta=args.carpeta_resultados,
+            )
+            if not universo_file or not reporte_file or output_path is None:
+                return 0
+    except ValueError as exc:
+        print(f"\n[ERROR] {exc}", file=sys.stderr)
+        return 1
     except EOFError:
         print(
             "\n[ERROR] Sin consola interactiva: indique --universo, --reporte y "

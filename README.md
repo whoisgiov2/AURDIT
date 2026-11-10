@@ -44,25 +44,28 @@ pip install -r requirements.txt
 
 ## 3. Uso
 
-### Ejecución interactiva
+### Ejecución interactiva (Menú en CMD)
 
 ```bash
 python AUDIT.py
 ```
 
-En Windows también puede ejecutarse `AUDIT.bat`, que reenvía los argumentos a `AUDIT.py`. El programa solicita, en orden:
+En Windows también puede ejecutarse `AUDIT.bat`, que reenvía los argumentos a `AUDIT.py`. Al iniciarse en consola interactiva, despliega un **menú principal** con el estado actual de los archivos registrados y cuatro opciones:
 
-1. **Ruta del archivo Universo.** Se ofrece como valor por defecto (Enter para aceptarlo) el archivo detectado automáticamente en la carpeta actual o, si no hay, la última ruta usada.
-2. **Ruta del reporte de logins**, salvo que se haya detectado automáticamente (`report<dígitos>` en la carpeta actual) o se indique con `--reporte`.
-3. **Carpeta de resultados:**
-   - **Primera vez:** pide la ruta y, si la carpeta no existe, pregunta antes de crearla. La carpeta debe estar fuera de la carpeta de scripts; de lo contrario se rechaza.
-   - **Ejecuciones siguientes:** pregunta si los resultados se guardan en la última carpeta usada. Si se responde que no, pide una nueva ruta (con las mismas validaciones) y la recuerda.
+1. **`[1] Ejecutar auditoría de accesos` (opción por defecto al presionar `Enter`):**
+   - **Selección de Universo:** Muestra una lista numerada con los archivos Universo ya registrados en configuración, las hojas `BajasU` extraídas previamente y los archivos detectados en la carpeta actual, para elegirlos con un solo número (`1`, `2`, ...) o `Enter`. También incluye la opción `[E]` para extraer en ese momento únicamente la hoja `BajasU` a un archivo ligero, o `[M]` para escribir/arrastrar otra ruta.
+   - **Selección de Reporte de Logins:** Muestra una lista numerada con los reportes detectados o usados recientemente, o permite arrastrar un nuevo archivo.
+   - **Carpeta de resultados:** Confirma la carpeta registrada (`[S/n]`) o solicita una nueva fuera de la carpeta de scripts.
+2. **`[2] Extraer solo la hoja 'BajasU' del Universo a un archivo único ligero`:**
+   - Toma el archivo Universo maestro (que suele contener múltiples pestañas pesadas) y genera un archivo `.xlsx` independiente (`<nombre>_BajasU.xlsx`) que contiene **únicamente** los datos limpios de la pestaña `BajasU`, dejándolo registrado como Universo predeterminado para agilizar futuras ejecuciones.
+3. **`[3] Cambiar carpeta de resultados registrada`.**
+4. **`[4] Salir`.**
 
 El archivo de resultados se guarda como `Auditoria_Accesos_Resultado_AAAA-MM-DD.xlsx` (fecha del día de la auditoría) dentro de la carpeta elegida. Si se ejecuta más de una vez el mismo día, el archivo se sobrescribe.
 
 ### Configuración guardada
 
-La última carpeta de resultados y la última ruta del Universo se guardan en `~/.auditoria_accesos/config.json` (fuera del repositorio). Puede cambiarse la ubicación con la variable de entorno `AUDITORIA_CONFIG`.
+La carpeta de resultados y el historial de archivos Universo y Reportes registrados se guardan en `~/.auditoria_accesos/config.json` (fuera del repositorio). Puede cambiarse la ubicación con la variable de entorno `AUDITORIA_CONFIG`.
 
 ### Ejecución no interactiva
 
@@ -73,16 +76,23 @@ python AUDIT.py \
   --carpeta-resultados "D:/Auditorias/2026-10"
 ```
 
+También puede extraerse directamente la hoja `BajasU` por línea de comandos:
+
+```bash
+python AUDIT.py --universo "Universo_Usuarios_PROD_2.xlsx" --extraer-hoja
+```
+
 Con `--carpeta-resultados` no se hacen preguntas de carpeta (se crea si no existe) y la ruta queda guardada para la próxima vez. Con `--salida` se indica la ruta completa del Excel y no se consulta ni se guarda la carpeta. Sin consola interactiva y con datos faltantes, el programa termina con error.
 
 ### Argumentos de línea de comandos
 
 | Argumento | Descripción | Valor por defecto |
 | :--- | :--- | :--- |
-| `-u`, `--universo` | Ruta al archivo Universo. | Se pregunta |
+| `-u`, `--universo` | Ruta al archivo Universo. | Se selecciona en menú |
 | `--hoja-universo` | Pestaña a leer en el Universo. | `BajasU` |
-| `-r`, `--reporte` | Ruta al reporte de logins (`.xlsx`, `.xls`, `.csv`). | Detección automática o se pregunta |
-| `--carpeta-resultados` | Carpeta de resultados (fuera de la carpeta de scripts). | Se pregunta |
+| `--extraer-hoja [RUTA]` | Extrae solo la pestaña del Universo a un archivo `.xlsx` único y ligero. | `<universo>_BajasU.xlsx` |
+| `-r`, `--reporte` | Ruta al reporte de logins (`.xlsx`, `.xls`, `.csv`). | Detección automática o menú |
+| `--carpeta-resultados` | Carpeta de resultados (fuera de la carpeta de scripts). | Se pregunta / recuerda |
 | `-o`, `--salida` | Ruta completa del Excel de resultados. | Ninguno |
 | `--auto` | Sin efecto funcional; se conserva por compatibilidad. | Desactivado |
 
@@ -181,7 +191,7 @@ La fecha de baja efectiva es la del Universo; si falta, se usa la del reporte.
 - Si el correo existe en el reporte pero asociado a un nombre distinto, no se enlaza el login y se marca `DISCREPANCIA_IDENTIDAD = True` para revisión de TI/IAM.
 - Los colaboradores sin coincidencia se muestran como `Sin registro` en `ULTIMO_LOGIN_DETECTADO` y `ESTATUS_CUENTA_REPORTE`.
 
-### 5.6 Detección de reingresos
+### 5.6 Detección de reingresos y movimientos por reajuste
 
 Un registro se clasifica como reingreso si, para la misma identidad, existe al menos un registro con baja y otro sin baja. La comparación se evalúa por cualquiera de estos criterios:
 
@@ -192,9 +202,11 @@ Un registro se clasifica como reingreso si, para la misma identidad, existe al m
 
 Los reingresos no se penalizan por bajas de relaciones laborales anteriores.
 
+Asimismo, si el Universo incluye la columna `NOM_TIPO_MOV` (o equivalente) y su valor contiene `"reajuste"` (sin distinguir mayúsculas ni acentos), el movimiento no corresponde a una baja definitiva, por lo que la cuenta puede seguir activa o registrar accesos sin considerarse riesgo y se clasifica como `CONFORME` (`ESTATUS_AUDITORIA = 'OK'`).
+
 ## 6. Matriz de riesgo
 
-Aplica a registros que no son reingreso. "Acceso post-baja" significa `fecha_login > fecha_baja`.
+Aplica a registros que no son reingreso ni movimiento por reajuste. "Acceso post-baja" significa `fecha_login > fecha_baja`.
 
 | Acceso post-baja | Cuenta (`Active`) | `ESTATUS_AUDITORIA` | `CATEGORIA_RIESGO` | Acción requerida |
 | :---: | :---: | :--- | :--- | :--- |
@@ -206,7 +218,7 @@ Aplica a registros que no son reingreso. "Acceso post-baja" significa `fecha_log
 
 Notas:
 
-- Los registros sin fecha de baja válida se clasifican como `CONFORME`.
+- Los registros sin fecha de baja válida o con `NOM_TIPO_MOV` de tipo `reajuste` se clasifican como `CONFORME` (`OK`).
 - Los colaboradores `Sin registro` en el reporte se consideran con cuenta inactiva.
 - `DIAS_POST_BAJA` solo se calcula cuando existe acceso post-baja.
 
@@ -217,7 +229,7 @@ El archivo `Auditoria_Accesos_Resultado_AAAA-MM-DD.xlsx` contiene cinco pestaña
 | # | Pestaña | Contenido |
 | :---: | :--- | :--- |
 | 1 | `Resumen_Auditoria` | Datos cuantitativos de la ejecución: fecha, archivos de entrada, volumen procesado, cantidad y porcentaje por categoría de riesgo, gráficos nativos de Excel junto a la tabla (dona con el porcentaje por categoría y barras con la cantidad), e indicadores adicionales (casos a revisar, discrepancias de identidad, sin registro, días post-baja máximo y promedio). |
-| 2 | `Auditoria_Completa` | Padrón deduplicado con todas las columnas originales más las columnas de auditoría. Al abrir el libro solo se ven nombre, clave (`cla_*`), ubicación, fecha de baja, `ULTIMO_LOGIN_DETECTADO`, `DIAS_POST_BAJA`, `ESTATUS_AUDITORIA` y `CATEGORIA_RIESGO`; el resto de columnas están agrupadas y ocultas, y se despliegan con los botones `+` (o el nivel `2`) sobre los encabezados de Excel. Las columnas relevantes se identifican por el nombre del encabezado. |
+| 2 | `Auditoria_Completa` | Padrón deduplicado con todas las columnas originales más las columnas de auditoría. Al abrir el libro solo se ven nombre, clave (`cla_*`), ubicación, fecha de baja, tipo de movimiento (`NOM_TIPO_MOV`), `ULTIMO_LOGIN_DETECTADO`, `DIAS_POST_BAJA`, `ESTATUS_AUDITORIA` y `CATEGORIA_RIESGO`; el resto de columnas están agrupadas y ocultas, y se despliegan con los botones `+` (o el nivel `2`) sobre los encabezados de Excel. Las columnas relevantes se identifican por el nombre del encabezado. |
 | 3 | `Riesgos_Activos` | Casos `CRÍTICO - RIESGO ACTIVO` y `ALTO - CUENTA HUÉRFANA`, ordenados por severidad y luego por días post-baja descendente. |
 | 4 | `Incidentes_Pasados` | Casos `MEDIO - INCIDENTE PASADO`, ordenados por último login descendente. |
 | 5 | `Reingresos` | Casos `POSIBLE REINGRESO`. |
